@@ -153,6 +153,57 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
             self.assertGreaterEqual(len(block), int(2048 / 4000 * AUDIO))
         win._playback.close()
 
+    def test_record_audio_seek_pause_and_loop(self):
+        """8 kHz audio at 0.5x with Record Audio on, through a seek, a
+        pause, the file's end (Loop) and 2x: the take keeps the
+        recording's own pace (what was played of it, at its own pitch),
+        the speaker plays on after each restart, and nothing is given out
+        between blocks once the sound has stopped."""
+        import shutil
+        import tempfile
+        import wave
+
+        folder = tempfile.mkdtemp(prefix="slow-take-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.store.values["recording/folder"] = folder
+        win = self.win
+        self.open_audio(8000, seconds=3.0)
+        device = win._device
+
+        def played():
+            return (device.position + device.loops * device.total_samples) / 4000
+
+        win._playback_bar.set_speed(0.5)
+        self.frames(1.0)
+        self.assertTrue(win._start_audio_recording())
+        start = played()
+        self.frames(2.0)
+        jump = -played()
+        win._playback.seek(2.5)  # (a little before the end: it loops)
+        jump += played()
+        self.assertFalse(win._playback_sound.stretching)
+        self.assertEqual(len(win._playback_sound.more(self.clock.now)), 0)
+        resumed = self.clock.now
+        self.frames(3.0)
+        self.assertGreaterEqual(device.loops, 1)
+        gaps, _dropped = self.troubles_since(resumed + 0.3)
+        self.assertLess(gaps, 0.01)
+        win._toggle_acquisition()  # (Space: pause)
+        self.assertFalse(win._playback_sound.stretching)
+        self.frames(0.5)
+        win._toggle_acquisition()
+        win._playback_bar.set_speed(2.0)
+        self.frames(2.0)
+        # (What played of the recording: the seek skipped what lay between.)
+        heard = played() - start - jump
+        path = win._stop_audio_recording()
+        with wave.open(path, "rb") as take:
+            frames = take.getnframes()
+            data = np.frombuffer(take.readframes(frames), dtype=np.int16)
+        self.assertAlmostEqual(frames / AUDIO, heard, delta=2048 / 4000 + 0.1)
+        self.assertAlmostEqual(_peak_hz(data[4800:52800]), 1000.0, delta=2.0)
+        win._playback.close()
+
 
 def _nfm(seconds, ctcss_hz, seed=1, rate=X_RATE, offset=X_OFFSET):
     """Narrow FM (5 kHz) tones with a CTCSS tone at 15 % of the deviation,

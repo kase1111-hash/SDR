@@ -16,6 +16,7 @@ The files are packed by hand (``tests/wav_builders.py``), not by the code
 under test.
 """
 
+import io
 import struct
 
 import numpy as np
@@ -432,6 +433,26 @@ class TestSamplesInWiderWords:
             assert wav_file.read_wav_header(path).justified == justified
             values = np.concatenate(list(wav_frames(path)))
             np.testing.assert_allclose(values, scale * x, atol=2e-4 * scale)
+
+    @pytest.mark.parametrize("container", ["RIFF", "RF64", "W64"])
+    def test_a_file_open_on_it_is_left_where_its_samples_start(
+        self, tmp_path, container
+    ):
+        """(read_wav_header of a binary file open on a WAV file leaves it
+        where the samples start, as it does for every other WAV file: the
+        words looked at to see where the samples lie left it after the
+        last of them.)"""
+        x = _tone(20000, freq=1234.0)
+        data = _s24_words(x, "right")
+        path = tmp_path / "s24_le.wav"
+        offset = write_wav(path, fmt_body(2, RATE, 4, bits=24), data, container)
+        with open(path, "rb") as handle:
+            assert wav_file.read_wav_header(handle).justified == "right"
+            assert handle.tell() == offset
+            assert handle.read(8) == data[:8]
+        handle = io.BytesIO(path.read_bytes())
+        assert wav_file.read_wav_header(handle).justified == "right"
+        assert handle.tell() == offset
 
 
 def _packed(tmp_path, ints):

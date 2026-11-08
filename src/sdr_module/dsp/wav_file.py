@@ -271,7 +271,8 @@ def _word_layout(source: Source, offset: int, data_bytes: int) -> str:
     only in level), "left", as libsndfile reads them: read as 32-bit
     samples. Unless a top byte zero under a set bit 23 shows the words zero
     above the sample (whose negative half read as 32-bit would turn
-    positive): "right"."""
+    positive): "right". A binary file open on it (``source``) is left where
+    it was."""
     count = max(0, int(data_bytes)) // 4
     if count <= _LAYOUT_STRETCHES * _LAYOUT_WORDS:
         starts, per = [0], count
@@ -279,6 +280,7 @@ def _word_layout(source: Source, offset: int, data_bytes: int) -> str:
         step = count // _LAYOUT_STRETCHES
         starts, per = [k * step for k in range(_LAYOUT_STRETCHES)], _LAYOUT_WORDS
     handle, own = _opened(source)
+    was = handle.tell()
     try:
         stretches = []
         for start in starts:
@@ -288,6 +290,9 @@ def _word_layout(source: Source, offset: int, data_bytes: int) -> str:
     finally:
         if own:
             handle.close()
+        else:
+            # (Where the samples start, as read_wav_header leaves any file.)
+            handle.seek(was)
     words = np.concatenate(stretches).astype(np.uint32)
     words = words[words != 0]
     if not words.size:

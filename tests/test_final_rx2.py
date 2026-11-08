@@ -427,6 +427,7 @@ class TestTheClippingRule(unittest.TestCase):
             "the largest FM deviation offered.",
         )
 
+    @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
     def test_the_main_window_uses_it(self):
         from sdr_module.gui import audio_chain, main_window
 
@@ -759,12 +760,18 @@ class TestTheDemoAirlinerFliesOneSky(unittest.TestCase):
     BLOCK = 80_000  # (a display frame at 2.4 MS/s)
 
     def setUp(self):
+        import weakref
+
         from sdr_module.gui import device_dialog
 
         self.dd = device_dialog
-        patcher = mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9)
-        patcher.start()  # (every sample is read, however slowly)
-        self.addCleanup(patcher.stop)
+        for name, value in (
+            ("_MAX_LAG_S", 1e9),  # (every sample is read, however slowly)
+            ("_SKY_DEVICES", weakref.WeakSet()),  # (only this test's devices)
+        ):
+            patcher = mock.patch.object(device_dialog, name, value, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def demo(self, shared=True, seed=7):
         dev = self.dd.MockDevice()

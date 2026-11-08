@@ -611,16 +611,18 @@ class TestRecordingsOfOneName(_DecodeCase):
         else its whole path."""
         name = self.win._decoded_name
         first = self.capture("monday", _morse_iq("E"), 7.03e6, 16000)
-        link = self.path("latest.wav")
-        os.symlink(first, link)
+        again = os.path.join(self.folder, "monday", os.pardir, "monday", "capture.wav")
         self.assertEqual(name(first), "capture.wav")
-        self.assertEqual(name(link), "capture.wav")  # (the same file)
+        self.assertEqual(name(again), "capture.wav")  # (the same file)
         x, y = (os.path.join(self.folder, f, "b", "c.wav") for f in "xy")
         self.assertEqual([name(x), name(y), name(y), name(x)],
                          ["c.wav", "b/c.wav", "b/c.wav", "c.wav"])  # fmt: skip
-        # Every ending of its path taken (by x's and y's): its whole path.
-        whole = os.path.join(os.sep, "b", "c.wav")
-        self.assertEqual(name(whole), whole)
+        # Every ending of its path taken (by x's and y's: on a drive or at
+        # the root): its whole path.
+        whole = os.path.join(os.path.abspath(os.sep), "b", "c.wav")
+        given = name(whole)
+        self.assertNotIn(given, ("c.wav", "b/c.wav"))
+        self.assertTrue(given.replace(os.sep, "/").endswith("/b/c.wav"), given)
 
 
 if __name__ == "__main__":

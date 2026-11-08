@@ -282,25 +282,30 @@ class TestTheDemoRepeaterSendsIt(unittest.TestCase):
         _seed, _duty, freq = _demo_dcs_signal()
         end = _first_end_s()
         rate = 2.4e6
-        costs = {}
+        starts = {"voice": end - 1.0, "turn-off": end - 0.19}
+
+        def cost(start):
+            device._stream_pos = int(start * rate)
+            t0 = time.perf_counter()
+            for _ in range(5):
+                device.read_samples(int(rate / 30))
+            return time.perf_counter() - t0
+
+        costs = {name: [] for name in starts}
         with mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9):
             device = MockDevice()
             device.set_sample_rate(rate)
             device.set_frequency(freq)
             device.start_rx()
-            for name, start in (("voice", end - 1.0), ("turn-off", end - 0.19)):
+            for start in starts.values():
                 device._stream_pos = int(start * rate)
                 device.read_samples(int(rate / 30))  # (warm)
-                device._stream_pos = int(start * rate)
-                best = []
-                for _ in range(3):
-                    device._stream_pos = int(start * rate)
-                    t0 = time.perf_counter()
-                    for _ in range(5):
-                        device.read_samples(int(rate / 30))
-                    best.append(time.perf_counter() - t0)
-                costs[name] = min(best)
-        self.assertLess(costs["turn-off"], 2.0 * costs["voice"])
+            # The two are timed in turns, so a machine that gets busier
+            # (another test run, say) slows both alike.
+            for _ in range(5):
+                for name, start in starts.items():
+                    costs[name].append(cost(start))
+        self.assertLess(min(costs["turn-off"]), 2.0 * min(costs["voice"]))
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

@@ -11639,8 +11639,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         protocol, offset = choice
         self._show_panel("decoder")
+        # Known by its path, not its file name alone: two recordings named
+        # alike keep lists of their own (files-1).
+        name = self._decoded_name(options.path)
         # (Decoded again: its aircraft or text are listed anew.)
-        self._decoder_panel.recording_decode_started(options.name, protocol)
+        self._decoder_panel.recording_decode_started(name, protocol)
         counts = {"messages": 0}
         # When the recording was made (SigMF's core:datetime), to stamp its
         # messages with their own time rather than the decode's.
@@ -11664,10 +11667,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 freq = options.center_hz + offset if options.center_hz else 0.0
                 self._push_decoded_message(
                     msg,
-                    note=f"from {options.name} at {at:.1f} s",
+                    note=f"from {name} at {at:.1f} s",
                     freq_hz=0.0 if as_audio else freq,
                     sample_rate=options.frame_rate if as_audio else options.sample_rate,
-                    source=options.name,
+                    source=name,
                     when=start + timedelta(seconds=at) if start else None,
                     at_s=at,
                 )
@@ -11675,7 +11678,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         result = run_job(
             self,
             "Decode Recording",
-            f"Decoding {protocol} in {options.name}…",
+            f"Decoding {protocol} in {name}…",
             lambda report, partial: decode_recording(
                 options, protocol, offset, report, partial
             ),
@@ -11693,13 +11696,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             QMessageBox.warning(
                 self,
                 "Decode Failed",
-                f"Could not decode {protocol} in {options.name}:\n{result.error}",
+                f"Could not decode {protocol} in {name}:\n{result.error}",
             )
             return False
         if result.cancelled:
             self._show_status_message(
                 f"Decoding stopped: {counts['messages']} message(s) from "
-                f"{options.name} so far.",
+                f"{name} so far.",
                 None,
                 6000,
             )
@@ -11719,7 +11722,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             self._show_status_message(
                 f"Decoded {decoded.valid} {protocol} message(s) from "
-                f"{options.name}{where}{failed}.{unread}",
+                f"{name}{where}{failed}.{unread}",
                 "success",
                 8000,
             )
@@ -11734,20 +11737,45 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 holds = "a receiver's FM audio"
             self._show_status_message(
-                f"No {protocol} messages in {options.name}{where}. Check the "
+                f"No {protocol} messages in {name}{where}. Check the "
                 f"protocol, and that it holds {holds}.",
                 "warning",
                 10000,
             )
         else:
             self._show_status_message(
-                f"No {protocol} messages in {options.name}{where}. Check the "
+                f"No {protocol} messages in {name}{where}. Check the "
                 "protocol and the frequency (the signal must be in the file)."
                 f"{unread}",
                 "warning",
                 10000,
             )
         return True
+
+    def _decoded_name(self, path: str) -> str:
+        """The name File > Decode Recording lists ``path``'s messages under
+        (in the Aircraft and Text views, the Messages table and Export):
+        its file name, or, when another file of that name was decoded
+        before, as many of its folders as tell it apart
+        ("tuesday/capture.wav"; its whole path if none do). A file keeps
+        its name, by any path to it: decoded again, its lists start over."""
+        names = self._own("_decoded_names")
+        if names is None:
+            names = self._decoded_names = {}
+        key = os.path.normcase(os.path.realpath(path))
+        name = names.get(key)
+        if name is None:
+            taken = set(names.values())
+            full = os.path.normpath(os.path.abspath(path))
+            parts = [part for part in full.split(os.sep) if part]
+            endings = ["/".join(parts[-depth:]) for depth in range(1, len(parts) + 1)]
+            name = next((n for n in endings + [full] if n not in taken), None)
+            count = 2
+            while name is None or name in taken:  # (a path named like one)
+                name = f"{full} ({count})"
+                count += 1
+            names[key] = name
+        return str(name)
 
     # Formats File > Save Recording writes:
     # (file dialog filter, extension, FileFormat name, SampleFormat name)

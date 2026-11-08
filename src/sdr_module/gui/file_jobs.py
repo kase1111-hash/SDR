@@ -111,6 +111,12 @@ class DecodeResult:
     #: (message, seconds into the file) of every message, valid or not.
     messages: List[Tuple[Any, float]] = field(default_factory=list)
     seconds: float = 0.0  # of the file decoded
+    #: ADS-B below 2.5 MS/s: replies left unread in a very busy sky (the
+    #: decoder's work per second is bounded, the clearest are read first).
+    skipped: int = 0
+    #: Its sound was decoded as a receiver's audio (an audio recording's
+    #: own samples: see IqFileOptions.decodes_as_audio), not its I/Q.
+    audio: bool = False
 
     @property
     def valid(self) -> int:
@@ -134,6 +140,23 @@ def _chunks(options: IqFileOptions, report: Report) -> Iterable[np.ndarray]:
             done += len(chunk)
             yield chunk
             report(min(1.0, done / total))
+
+
+def _audio_chunks(options: IqFileOptions, report: Report) -> Iterable[np.ndarray]:
+    """A one-channel WAV file's own samples (float, full scale 1.0, at its
+    own rate), a chunk at a time, reporting progress: its sound as it was
+    recorded, not the I/Q it plays as. Samples that aren't numbers (a
+    damaged floating-point file) are read as 0 (as ``sdr-scan decode``
+    reads them: :func:`~sdr_module.dsp.recording.wav_frames`)."""
+    from ..dsp.recording import wav_frames
+
+    total = max(1, read_wav_header(options.path).frames)
+    done = 0
+    report(0.0)
+    for values in wav_frames(options.path, CHUNK_SAMPLES):
+        done += len(values)
+        yield values
+        report(min(1.0, done / total))
 
 
 def load_recording(
@@ -281,10 +304,15 @@ def decode_recording(
     """Run the live decoder for ``protocol`` over the whole file, its
     channel ``offset_hz`` from the file's center, a chunk at a time (as
     fast as the computer goes). ``found`` gets each chunk's messages with
-    their time in the file as they come."""
+    their time in the file as they come. An audio recording's sound goes
+    to the decoder as a receiver's audio where the protocol is sent as
+    one (``options.decodes_as_audio``: its own samples, ``offset_hz``
+    unused; the result's ``audio``)."""
     from ..dsp.live_decoders import create_live_decoder, format_rate
 
-    decoder = create_live_decoder(protocol, options.sample_rate, offset_hz)
+    as_audio = options.decodes_as_audio(protocol)
+    rate = float(options.frame_rate if as_audio else options.sample_rate)
+    decoder = create_live_decoder(protocol, rate, offset_hz, audio=as_audio)
     status = decoder.status
     if status.problem:
         low = float(getattr(decoder, "MIN_SAMPLE_RATE", 0.0) or 0.0)
@@ -296,13 +324,13 @@ def decode_recording(
                 f"recording is {format_rate(options.sample_rate)}"
             )
         raise ValueError(status.problem)
-    result = DecodeResult()
-    rate = float(options.sample_rate)
+    result = DecodeResult(audio=as_audio)
     # A message is stamped with the end of the stretch it was found in: a
     # short one (a whole chunk is 22 s at 48 kS/s).
     step = max(4096, int(DECODE_STEP_S * rate))
     position = 0
-    for chunk in _chunks(options, report):
+    chunks = _audio_chunks(options, report) if as_audio else _chunks(options, report)
+    for chunk in chunks:
         stamped = []
         for start in range(0, len(chunk), step):
             part = chunk[start : start + step]
@@ -321,6 +349,7 @@ def decode_recording(
         if found is not None:
             found(stamped)
     result.seconds = position / rate
+    result.skipped = int(getattr(decoder, "skipped", 0) or 0)
     return result
 
 

@@ -33,6 +33,7 @@ except ImportError:
 from ..core.chirp_csv import chirp_mode_for, is_chirp_channel
 from ..dsp.dcs import DCS_CODES, dcs_label, format_dcs, parse_dcs
 from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
+from .audio_chain import REVERSE_TONE_TIP
 from .control_panel import (
     DEMOD_MODES,
     FM_DEVIATIONS,
@@ -68,19 +69,29 @@ _CROSS_RECEIVE_TONE = ("Tone->Tone", "->Tone", "DTCS->Tone")
 _CROSS_RECEIVE_DCS = ("Tone->DTCS", "->DTCS", "DTCS->DTCS")
 #: CHIRP's default DtcsCode, for a DTCS channel saved without one.
 _CHIRP_DEFAULT_DCS = 23
+#: CHIRP's tone squelch modes and their reverse ones (TSQL-R, DTCS-R: muted
+#: while the tone or code is heard), each way.
+_REVERSED = {"TSQL": "TSQL-R", "TSQL-R": "TSQL", "DTCS": "DTCS-R", "DTCS-R": "DTCS"}
 
 
 def bookmark_tone_hz(bookmark: Dict[str, Any]) -> float:
     """The CTCSS tone (Hz) a bookmark's tone squelch listens for, 0 for
     none: CHIRP's TSQL tone, or a Cross channel's receive tone (its
     cToneFreq, 88.5 Hz when not saved). A DCS code is
-    :func:`bookmark_dcs`'s; reverse tone squelch isn't supported: 0."""
+    :func:`bookmark_dcs`'s, and a reverse tone squelch (TSQL-R)
+    :func:`bookmark_squelch`'s: 0 here."""
     tone_mode = str(bookmark.get("tone_mode") or "")
     cross = str(bookmark.get("cross_mode") or "").replace(" ", "")
     if not (
         tone_mode == "TSQL" or (tone_mode == "Cross" and cross in _CROSS_RECEIVE_TONE)
     ):
         return 0.0
+    return _saved_tone(bookmark)
+
+
+def _saved_tone(bookmark: Dict[str, Any]) -> float:
+    """A bookmark's cToneFreq (Hz; CHIRP's 88.5 when not saved), 0 for a
+    damaged one."""
     raw = bookmark.get("ctone")
     try:
         tone = float(_CHIRP_DEFAULT_TONE_HZ if raw is None else raw)
@@ -95,15 +106,20 @@ def bookmark_dcs(bookmark: Dict[str, Any]) -> Optional[Tuple[int, bool]]:
     channel that receives with a code (its RxDtcsCode), with the receive
     polarity (the second letter of DtcsPolarity: R is inverted). A code
     that isn't one of the standard ones (or a damaged value) gives None.
-    Reverse DCS (DTCS-R) isn't supported: None."""
+    Reverse DCS (DTCS-R) is :func:`bookmark_squelch`'s: None here."""
     tone_mode = str(bookmark.get("tone_mode") or "")
     cross = str(bookmark.get("cross_mode") or "").replace(" ", "")
     if tone_mode == "DTCS":
-        raw = bookmark.get("dtcs", _CHIRP_DEFAULT_DCS)
-    elif tone_mode == "Cross" and cross in _CROSS_RECEIVE_DCS:
-        raw = bookmark.get("rx_dtcs", _CHIRP_DEFAULT_DCS)
-    else:
-        return None
+        return _saved_code(bookmark, "dtcs")
+    if tone_mode == "Cross" and cross in _CROSS_RECEIVE_DCS:
+        return _saved_code(bookmark, "rx_dtcs")
+    return None
+
+
+def _saved_code(bookmark: Dict[str, Any], key: str) -> Optional[Tuple[int, bool]]:
+    """The DCS code saved under ``key`` (CHIRP's 023 when not saved) with
+    the receive polarity, or None (not a standard code, or damaged)."""
+    raw = bookmark.get(key, _CHIRP_DEFAULT_DCS)
     try:
         number = float(_CHIRP_DEFAULT_DCS if raw is None else raw)
     except (TypeError, ValueError, OverflowError):  # (a damaged setting)
@@ -115,6 +131,29 @@ def bookmark_dcs(bookmark: Dict[str, Any]) -> Optional[Tuple[int, bool]]:
     if found is None:
         return None
     return found[0], polarity[1:2] == "R"
+
+
+def bookmark_squelch(
+    bookmark: Dict[str, Any],
+) -> Tuple[float, Optional[Tuple[int, bool]], bool]:
+    """``(CTCSS tone Hz, DCS code, reverse)``: the tone squelch tuning a
+    bookmark sets (FM). Its tone (0 for none) or its code (``(code,
+    inverted)``, None for none), at most one of them, as
+    :func:`bookmark_tone_hz` and :func:`bookmark_dcs` give them, or
+    reversed (``reverse`` True), as CHIRP means its reverse modes and the
+    radios that have them work: TSQL-R is muted while its cToneFreq (the
+    tone CHIRP shows for TSQL) is heard, DTCS-R while its DtcsCode is, with
+    the receive polarity (DtcsPolarity's second letter); every other
+    station is heard. A damaged tone or code is no squelch."""
+    tone_mode = str(bookmark.get("tone_mode") or "")
+    if tone_mode == "TSQL-R":
+        tone = _saved_tone(bookmark)
+        return tone, None, tone > 0
+    if tone_mode == "DTCS-R":
+        code = _saved_code(bookmark, "dtcs")
+        return 0.0, code, code is not None
+    tone = bookmark_tone_hz(bookmark)
+    return tone, None if tone else bookmark_dcs(bookmark), False
 
 
 class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
@@ -138,11 +177,12 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
             raise ImportError("PyQt6 is required")
         super().__init__(parent)
         self._original = dict(bookmark)
-        self._initial_tone = bookmark_tone_hz(bookmark)
-        code = bookmark_dcs(bookmark)
+        tone, code, reverse = bookmark_squelch(bookmark)
+        self._initial_tone = tone
         # The squelch as the Tone list holds it: a CTCSS tone (Hz, 0 for
-        # none) or a DCS code ("D023N").
+        # none) or a DCS code ("D023N"); and whether it is reversed.
         self._initial_squelch: Any = format_dcs(*code) if code else self._initial_tone
+        self._initial_reverse = reverse
         self.setWindowTitle("Edit Bookmark")
         self.setMinimumWidth(400)
         self._setup_ui(listening, list(groups))
@@ -166,13 +206,15 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
 
         self._freq = _MhzSpinBox()
         # (Up to the bookmark's own frequency: one made while a recording
-        # above 6 GHz played was rewritten to 6000 MHz by Save.)
+        # above 6 GHz played was rewritten to 6000 MHz by Save; and down to
+        # it, one below 1 kHz in a one-channel recording.)
         try:
             saved = float(b.get("freq_hz", 0.0) or 0.0)
         except (TypeError, ValueError):
             saved = 0.0
         top = max(MAX_FREQUENCY_HZ, saved) if math.isfinite(saved) else MAX_FREQUENCY_HZ
-        self._freq.setRange(MIN_FREQUENCY_HZ / 1e6, top / 1e6)
+        bottom = saved if 0 < saved < MIN_FREQUENCY_HZ else MIN_FREQUENCY_HZ
+        self._freq.setRange(bottom / 1e6, top / 1e6)
         self._freq.setDecimals(6)
         self._freq.setSuffix(" MHz")
         self._freq.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -229,6 +271,13 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         tone_index = self._tone.findData(initial) if initial else 0
         self._tone.setCurrentIndex(max(tone_index, 0))
         form.addRow("CTCSS/DCS &tone:", self._tone)
+
+        # Reverse (CHIRP's TSQL-R and DTCS-R): muted while it is heard.
+        self._reverse = QCheckBox("&Reverse: mute this tone or code")
+        self._reverse.setChecked(self._initial_reverse)
+        self._reverse.setToolTip(REVERSE_TONE_TIP)
+        form.addRow("", self._reverse)
+        self._tone.currentIndexChanged.connect(self._update_reverse)
 
         self._group = QComboBox()
         self._group.setEditable(True)
@@ -332,6 +381,7 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         fm = demod == "FM"
         self._deviation.setEnabled(fm)
         self._tone.setEnabled(fm)
+        self._update_reverse()
         current = self._width.currentData()
         self._width.blockSignals(True)
         self._width.clear()
@@ -355,6 +405,20 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
             )
         else:
             self._hint.setText(f"Tuning this bookmark selects {demod}.")
+
+    def _update_reverse(self, _index: int = 0) -> None:
+        """Reverse applies to a tone or code chosen, in FM."""
+        reverse = getattr(self, "_reverse", None)
+        if reverse is None:  # (the Mode list is set up before it)
+            return
+        chosen = bool(self._tone.currentData())
+        reverse.setEnabled(self.demod() == "FM" and chosen)
+        reverse.setToolTip(
+            REVERSE_TONE_TIP
+            if chosen
+            else "Choose a CTCSS tone or DCS code first: Reverse mutes the "
+            "stations that send it"
+        )
 
     # ------------------------------------------------------------------ #
     def demod(self) -> str:
@@ -407,22 +471,32 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
             choice = self._tone.currentData()
             if not isinstance(choice, (float, str)):
                 choice = 0.0
-            if choice != self._initial_squelch:
+            # (Reverse applies to a tone or code: with none it is no squelch.)
+            reverse = self._reverse.isChecked() and bool(choice)
+            tone_mode = str(b.get("tone_mode") or "")
+            if (
+                choice == self._initial_squelch
+                and reverse != self._initial_reverse
+                and tone_mode in _REVERSED
+            ):
+                # Only reversed (or back): its tones, codes and polarity stay.
+                b["tone_mode"] = _REVERSED[tone_mode]
+            elif choice != self._initial_squelch or reverse != self._initial_reverse:
                 code = parse_dcs(choice) if isinstance(choice, str) else None
-                tone_mode = str(b.get("tone_mode") or "")
                 if code is not None:
-                    # Sent and heard with the same code (CHIRP's DTCS mode).
+                    # Sent and heard with the same code (CHIRP's DTCS mode;
+                    # DTCS-R reversed).
                     letter = "R" if code[1] else "N"
-                    b["tone_mode"] = "DTCS"
+                    b["tone_mode"] = "DTCS-R" if reverse else "DTCS"
                     b["dtcs"] = code[0]
                     b["dtcs_polarity"] = letter + letter
                 elif isinstance(choice, float) and choice:
-                    b["tone_mode"] = "TSQL"
+                    b["tone_mode"] = "TSQL-R" if reverse else "TSQL"
                     b["ctone"] = choice
-                elif tone_mode == "TSQL":
+                elif tone_mode in ("TSQL", "TSQL-R"):
                     b.pop("tone_mode", None)
                     b.pop("ctone", None)
-                elif tone_mode == "DTCS":
+                elif tone_mode in ("DTCS", "DTCS-R"):
                     for key in ("tone_mode", "dtcs", "dtcs_polarity"):
                         b.pop(key, None)
                 elif tone_mode == "Cross":

@@ -117,14 +117,20 @@ from . import presets as preset_table
 from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
+    CLIP_FRACTION,
+    CLIP_MIN_SNR_DB,
+    CLIP_WARN_AFTER_S,
+    CLIP_WARN_EVERY_S,
     DEFAULT_CW_PITCH_HZ,
     DEFAULT_NOTCH_HZ,
     LOW_CUT_CHOICES,
     NOTCH_CHOICES,
     SUBAUDIBLE_CUT_HZ,
+    TAIL_ELIMINATION_TIP,
     AudioAgc,
     AudioJoin,
     AudioOptions,
+    ClipWarning,
     DcBlocker,
     IqConditioner,
     LevelAverager,
@@ -137,10 +143,11 @@ from .audio_chain import (
 )
 from .audio_recording import AudioTake, audio_file_name
 from .audio_sink import AudioSink
-from .bookmark_editor import bookmark_dcs
+from .bookmark_editor import bookmark_squelch
 from .bookmarks_panel import BookmarksPanel, default_bookmark_name
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
+    FM_DEVIATIONS,
     MAX_FREQUENCY_HZ,
     MIN_FREQUENCY_HZ,
     SAVE_FORMATS,
@@ -149,6 +156,16 @@ from .control_panel import (
     closest_bandwidth,
 )
 from .decoder_panel import DecoderPanel
+from .deemphasis import (
+    CROSSFADE_S,
+    DEEMPHASIS_CHOICES,
+    DEFAULT_DEEMPHASIS,
+    StageCrossfade,
+    carry_state,
+    deemphasis_note,
+    deemphasis_seconds,
+    usable_deemphasis,
+)
 from .device_controls import (
     DeviceControls,
     ScanResultsDialog,
@@ -173,12 +190,12 @@ from .iq_files import (
     RecordingInfoDialog,
     ask_recording_details,
     describe_iq_file,
-    format_size,
-    needs_options,
-    split_name,
 )
+from .iq_files import format_rate as format_file_rate
+from .iq_files import format_size, needs_options, split_name
 from .level_meter import LevelMeter
 from .playback import PlaybackBar, PlaybackController, playing_line
+from .playback_sound import PlaybackSound
 from .plot_view import PlotView, normalize_zoom
 from .preferences_dialog import (
     KEY_AUDIO_OUTPUT,
@@ -207,7 +224,13 @@ from .status_history import (
     StatusHistory,
     StatusHistoryPopup,
 )
-from .stereo_audio import StereoPath
+from .stereo_audio import (
+    DEFAULT_STEREO_BLEND,
+    STEREO_BLEND_CHOICES,
+    StereoPath,
+    stereo_blend_note,
+    usable_blend,
+)
 from .themes import (
     apply_theme,
     current_theme,
@@ -306,11 +329,21 @@ _NO_VALUE = "—"  # em dash for "not available"
 _DEFAULT_VOLUME = 70  # percent
 # Radio > Audio > Stereo (K-S1): broadcast FM in stereo, on by default.
 _STEREO_KEY = "audio/stereo"
+# Radio > Audio > De-emphasis (M-A1): "75" (us, the default) or "50".
+_DEEMPHASIS_KEY = "audio/deemphasis"
+# Radio > Audio > Stereo Blend (M-A2): "less", "normal" (default), "more".
+_STEREO_BLEND_KEY = "audio/stereo_blend"
+# Radio > Audio > Squelch Tail Elimination (radios' STE): a CTCSS station's
+# reverse burst closes the tone squelch (M-Q2); on by default.
+_TAIL_ELIMINATION_KEY = "audio/tail_elimination"
 # The STEREO badge and lamp light while at least this much of the stereo
 # difference plays (about 10 dB of separation), and go out below
 # _STEREO_OFF_BLEND (no flicker while the blend hovers).
 _STEREO_ON_BLEND = 0.5
 _STEREO_OFF_BLEND = 0.35
+# Below the lamp's threshold, more of the difference than this (2 %, a
+# third of a dB of separation) is "nearly mono" in the badge's tooltip.
+_NEARLY_MONO_BLEND = 0.02
 _VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # Audio is only played while the device delivers at least this fraction of
 # its sample rate: less than that (a device or computer that can't keep up)
@@ -388,7 +421,12 @@ _RETUNE_SETTLE_S = 0.12
 # Tuning (see SDRMainWindow.set_frequency): the tuned channel may sit
 # anywhere in this inner fraction of the span (the receiver's anti-alias
 # filter rolls off at its edges) before the LO is retuned to center it.
+# (A device can say otherwise with ``usable_fraction``: a one-channel
+# recording's I/Q has no such roll-off, see gui/playback.py.)
 _USABLE_SPAN_FRACTION = 0.8
+# The lowest frequency tuned in a recording whose span reaches 0 Hz (a
+# one-channel file's: 0 Hz to half its rate), below the receiver's range.
+_LOWEST_PLAYBACK_HZ = 1.0
 # A frequency joins the Back/Forward history and Recent Frequencies once
 # the receiver has stayed on it this long (so stepping through a band
 # doesn't fill them with every step).
@@ -530,11 +568,11 @@ _AM_HOLD_S = _SQUELCH_HANG_S
 _AM_LEFT_S = _AM_HOLD_S + 0.1
 # FM audio clipping warning: more than this fraction of the samples beyond
 # full scale for this long (the deviation is set too small), at most this
-# often.
-_CLIP_FRACTION = 0.05
-_CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
-_CLIP_WARN_AFTER_S = 0.5
-_CLIP_WARN_EVERY_S = 30.0
+# often. (The rule both receivers use: audio_chain.ClipWarning.)
+_CLIP_FRACTION = CLIP_FRACTION
+_CLIP_MIN_SNR_DB = CLIP_MIN_SNR_DB  # (noise clips whatever the deviation)
+_CLIP_WARN_AFTER_S = CLIP_WARN_AFTER_S
+_CLIP_WARN_EVERY_S = CLIP_WARN_EVERY_S
 # Noise reduction leaves an FM or AM channel this far above its noise alone.
 _NR_CLEAN_SNR_DB = 30.0
 # The radio tuner's FM seek stops on a broadcast station: one filling at
@@ -834,9 +872,18 @@ class _Resampler:
 
 def _filter_width(mode: str, bandwidth: float, rate: float) -> float:
     """The Bandwidth control, limited to what ``mode`` can use: the SSB or
-    CW filter width in those modes, else the channel width."""
+    CW filter width in those modes, else the channel width.
+
+    An SSB filter is no wider than ``rate`` holds above its 200 Hz edge,
+    skirt included: a slow recording's I/Q rate is a few kHz (6 kHz
+    audio's, 3 kHz, holds a 1.15 kHz filter: its sound to 1.35 kHz). A
+    wider one folded its top back into what played (8 kHz audio with the
+    3.6 kHz filter: its 3.3 kHz tone at 0.7 kHz, as loud)."""
     if mode in ("USB", "LSB"):
         low, high = _SSB_WIDTH_RANGE
+        room = 0.5 * float(rate) - _SSB_LOW_HZ - _SSB_TRANSITION_HZ
+        if room > 0:
+            high = max(low, min(high, room))
         return min(max(float(bandwidth), low), high)
     if mode == "CW":
         low, high = _CW_WIDTH_RANGE
@@ -946,7 +993,10 @@ class _ReceiverChain:
 
     AM and FM audio is low-passed to at most 15 kHz, 60 dB down by 18.5 kHz
     (below broadcast FM's 19 kHz stereo pilot); FM with a broadcast
-    deviation (50 kHz or more) is also de-emphasized (75 us).
+    deviation (50 kHz or more) is also de-emphasized: 75 us, or the
+    ``deemphasis_s`` of ``options`` (50 us in most of the world). A new
+    time constant takes over in 10 ms while a station plays, mono and
+    stereo alike (see ``gui/deemphasis.py``).
 
     In USB, LSB and CW the Bandwidth is the filter width, and the channel
     filter ends in that filter: USB/LSB keep 200 Hz to 200 Hz plus the width
@@ -1016,12 +1066,18 @@ class _ReceiverChain:
         self._audio_factor = total // first
         self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.intermediate_rate)
         self._deemphasis = False  # set by demodulate() for broadcast FM
+        self._deemphasis_s = _DEEMPHASIS_S  # its time constant (the options')
         self._voice = False  # set by demodulate() for narrow FM (voice)
+        # A new de-emphasis time constant while broadcast FM plays: the old
+        # audio filters crossfade into the new ones (gui/deemphasis.py).
+        self._stage_fade: Optional[StageCrossfade] = None
         self._design_demodulator()
         # Stream objects are built once and only reset after a gap: muted or
         # squelched frames reset the demodulator every frame, and rebuilding
         # the resampler table and filter designs each time cost ~0.6 ms.
-        self._audio_cache: Dict[Tuple[bool, bool], List[_FirDecimator]] = {}
+        self._audio_cache: Dict[
+            Tuple[bool, bool, Optional[float]], List[_FirDecimator]
+        ] = {}
         self._sideband: Optional[_FirDecimator] = None  # (now in the channel)
         self._resampler: Optional[_Resampler] = None
         if abs(self.intermediate_rate - self.audio_rate) > 1e-6 * self.audio_rate:
@@ -1078,7 +1134,10 @@ class _ReceiverChain:
 
         In USB, LSB and CW the decimation only needs to keep +/- a quarter
         of the channel rate (a lighter filter), and the SSB or CW filter at
-        the channel rate ends the chain: the channel is the passband.
+        the channel rate ends the chain: the channel is the passband. Not
+        decimated (a slow recording's I/Q, a few kHz), it keeps all of
+        that channel, which a quarter of the rate may not hold (8 kHz audio
+        played only to 1 kHz, 6 kHz audio's 1 kHz tone not at all).
         """
         rate = self.rate
         narrow = mode in _NARROW_MODES
@@ -1086,6 +1145,10 @@ class _ReceiverChain:
             return []  # the channel is the whole span: nothing to remove
         if narrow:
             pass_hz = 0.25 * self.channel_rate
+            if factor == 1:
+                low, high = _channel_edges(mode, self.bandwidth, rate)
+                reach = min(max(-low, high), 0.5 * rate - _SSB_TRANSITION_HZ)
+                pass_hz = max(pass_hz, reach)
         else:
             pass_hz = min(half, 0.45 * self.channel_rate)
         stop_hz = min(pass_hz * 1.25, max(self.channel_rate - pass_hz, pass_hz * 1.05))
@@ -1216,14 +1279,21 @@ class _ReceiverChain:
         in narrow FM) and the decimation to the intermediate rate, reset to
         a fresh stream.
 
-        Built once per de-emphasis and voice setting and reused."""
-        key = (self._deemphasis, self._voice)
+        Built once per de-emphasis (and time constant) and voice setting
+        and reused."""
+        key = self._audio_key()
         cached = self._audio_cache.get(key)
         if cached is None:
             cached = self._audio_cache[key] = self._build_audio_stages()
         for stage in cached:
             stage.reset()
         return cached
+
+    def _audio_key(self) -> Tuple[bool, bool, Optional[float]]:
+        """What the audio stages depend on: de-emphasis (and its time
+        constant), voice."""
+        tau = self._deemphasis_s if self._deemphasis else None
+        return (self._deemphasis, self._voice, tau)
 
     def _build_audio_stages(self) -> List[_FirDecimator]:
         stages = []
@@ -1235,7 +1305,7 @@ class _ReceiverChain:
             # free of aliases too.)
             taps = _lowpass_taps(_VOICE_AUDIO_HZ, _VOICE_STOP_HZ, self._audio_rate_in)
         if self._deemphasis:
-            deemphasis = _deemphasis_taps(self._audio_rate_in)
+            deemphasis = _deemphasis_taps(self._audio_rate_in, self._deemphasis_s)
             taps = (
                 deemphasis
                 if taps is None
@@ -1265,6 +1335,9 @@ class _ReceiverChain:
         self._am_last = 0.0
         self._am_last_gain = 0.0
         self._bfo_phase = 0.0
+        # (A new stream starts with the de-emphasis asked for: no crossfade.)
+        self._deemphasis_s = self._wanted_deemphasis()
+        self._stage_fade = None
         self._audio = self._audio_stages()
         if self._sideband is not None:
             self._sideband.reset()
@@ -1312,9 +1385,12 @@ class _ReceiverChain:
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
             voice = float(fm_deviation) <= _FM_VOICE_DEVIATION_HZ
+            tau = self._wanted_deemphasis()
             if (broadcast, voice) != (self._deemphasis, self._voice):
                 changed = broadcast != self._deemphasis
                 self._deemphasis, self._voice = broadcast, voice
+                self._deemphasis_s = tau  # (a new stream: no crossfade)
+                self._stage_fade = None
                 self._audio = self._audio_stages()
                 if changed:
                     # Broadcast keeps its deepest bass (a 2 Hz corner still
@@ -1324,6 +1400,8 @@ class _ReceiverChain:
                     )
                 if self._stereo_path is not None:
                     self._stereo_path.running = False  # (a new audio stream)
+            elif tau != self._deemphasis_s:
+                self._change_deemphasis(tau)
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:
@@ -1383,10 +1461,56 @@ class _ReceiverChain:
         return self._agc(audio)
 
     @property
+    def deemphasis_s(self) -> float:
+        """Broadcast FM's de-emphasis time constant (s): what the options
+        ask for (``deemphasis_s``: 75 us, or 50 us in most of the world),
+        75 us without options. The mono program and the stereo difference
+        signal are both heard through it."""
+        return self._deemphasis_s
+
+    def _wanted_deemphasis(self) -> float:
+        return usable_deemphasis(
+            getattr(self._options(), "deemphasis_s", _DEEMPHASIS_S)
+        )
+
+    def _change_deemphasis(self, tau: float) -> None:
+        """Another de-emphasis time constant asked for while FM plays. In
+        broadcast FM the audio filters for it start where the old ones are
+        in the stream and take over in 10 ms (the stereo difference path
+        alike, from the same sample): no click. A change while the last
+        one still crossfades waits for the next block."""
+        if not self._deemphasis:
+            self._deemphasis_s = tau  # (narrow FM has none: nothing to do)
+            return
+        if self._stage_fade is not None:
+            return
+        old = self._audio
+        self._deemphasis_s = tau
+        key = self._audio_key()
+        new = self._audio_cache.get(key)
+        if new is None:
+            new = self._audio_cache[key] = self._build_audio_stages()
+        for theirs, mine in zip(old, new, strict=True):
+            carry_state(theirs, mine)
+        length = int(round(CROSSFADE_S * self.intermediate_rate))
+        self._stage_fade = StageCrossfade(old, new, length)
+        self._audio = new
+        path = self._stereo_path
+        if path is not None and path.running:
+            path.change_deemphasis(self, length)
+
+    @property
     def notch_frequency_hz(self) -> Optional[float]:
         """The frequency the audio notch removes now (set by hand, or the
-        whistle Auto found), None when it removes none."""
+        strongest whistle Auto found), None when it removes none."""
         return self._listening.notch_frequency_hz
+
+    @property
+    def notch_frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency the audio notch removes now: the one set by
+        hand, or each whistle Auto found (up to three, the strongest
+        first); empty when it removes none."""
+        return self._listening.notch_frequencies_hz
 
     def retuned(self) -> None:
         """Another station tuned: the notch's Auto searches anew."""
@@ -1460,6 +1584,11 @@ class _ReceiverChain:
             path = self._stereo_path = StereoPath(self)
         if not path.running:
             path.sync(self)
+        decoder = path.decoder
+        decoder.tau_s = self._deemphasis_s  # (its hiss estimate)
+        decoder.blending = usable_blend(
+            getattr(self._options(), "stereo_blend", DEFAULT_STEREO_BLEND)
+        )
         return path.process(mpx, nr)
 
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
@@ -1650,8 +1779,15 @@ class _ReceiverChain:
 
     def _to_audio_rate(self, audio: np.ndarray) -> np.ndarray:
         """Audio filter, decimation and resampling to exactly 48 kHz."""
-        for stage in self._audio:
-            audio = stage.process(audio)
+        fade = self._stage_fade
+        if fade is not None:
+            # (A new de-emphasis time constant taking over.)
+            audio = fade.process(audio)
+            if fade.finished:
+                self._stage_fade = None
+        else:
+            for stage in self._audio:
+                audio = stage.process(audio)
         if self._resampler is not None:
             audio = self._resampler.process(audio)
         return audio
@@ -3004,6 +3140,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._noise_floor = NoiseFloorTracker()
         self._audio_options = AudioOptions()
         self._audio_join = AudioJoin(_AUDIO_RATE)
+        # A recording's sound at 0.5x, 2x or 4x (and at 1x on a computer
+        # that can't keep up): time-stretched to the pace it really plays
+        # at, its pitch kept (M-P1; see _speak).
+        self._playback_sound = PlaybackSound(_AUDIO_RATE, AudioSink.TARGET_S)
         self._join_chain: Optional["_ReceiverChain"] = None
         self._join_deviation = 0.0
         self._join_nr: Any = None  # the noise reduction the last block had
@@ -3011,12 +3151,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demod_running = False
         self._tone_squelch = ToneSquelch(_AUDIO_RATE)
         self._tone_channel: Optional[float] = None  # where the tone was heard
+        self._tone_gate_open = False  # the squelch, as the tone squelch saw it
+        self._quiet_reverse = False  # (a bookmark sets Reverse: it says so)
         self._iq_conditioner = IqConditioner()
-        self._clip_s = 0.0
-        self._clip_warn_due = 0.0
-        # How far the audio swung, (peak, often) in Hz, in the frames that
-        # clipped lately (the warning names what holds it).
-        self._clip_swings: Deque[Tuple[float, float]] = deque(maxlen=60)
+        # The FM clipping warning: how long the audio clipped lately and
+        # how far it swung (the warning names what holds it), its rule.
+        self._clip_warning = ClipWarning()
         # The Scanner tab mutes the speaker while it moves between channels,
         # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
@@ -3156,6 +3296,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Radio > Audio > Stereo, and what the STEREO badge and the radio
         # tuner's lamp show: (text, tone, tip) and whether stereo plays.
         self._stereo_enabled = self._settings.get_bool(_STEREO_KEY, True)
+        # Radio > Audio > De-emphasis (M-A1): broadcast FM's time constant,
+        # read by every receiver chain from the audio options.
+        self._deemphasis_choice = self._saved_choice(
+            _DEEMPHASIS_KEY, DEEMPHASIS_CHOICES, DEFAULT_DEEMPHASIS
+        )
+        self._audio_options.deemphasis_s = (
+            deemphasis_seconds(self._deemphasis_choice) or _DEEMPHASIS_S
+        )
+        # Radio > Audio > Stereo Blend (M-A2): how far a weak station
+        # blends toward mono (the chains' stereo decoders read it).
+        self._stereo_blend_choice = self._saved_choice(
+            _STEREO_BLEND_KEY, STEREO_BLEND_CHOICES, DEFAULT_STEREO_BLEND
+        )
+        self._audio_options.stereo_blend = self._stereo_blend_choice
+        # Radio > Audio > Squelch Tail Elimination: whether a CTCSS
+        # station's reverse burst closes the tone squelch (and so what Scan
+        # Bookmarks hears); a damaged value is logged and read as on.
+        self._tail_elimination = self._settings.get_bool(_TAIL_ELIMINATION_KEY, True)
+        self._tone_squelch.tail_elimination = self._tail_elimination
         self._stereo_shown: Tuple[str, Optional[str], str] = ("", None, "")
         self._stereo_lit = False
         self._audio_problem: Optional[str] = None
@@ -3648,9 +3807,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             notch_menu,
             panel._notch_combo,
             [(value, text) for value, text, _tip in NOTCH_CHOICES],
-            "Remove a whistle (a heterodyne) from the audio: Auto finds it, "
-            "Manual removes the frequency set (Audio group in the control "
-            "panel; AM, SSB, CW and narrow FM)",
+            "Remove whistles (heterodynes) from the audio: Auto finds up to "
+            "three, Manual removes the frequency set (Audio group in the "
+            "control panel; AM, SSB, CW and narrow FM)",
         )
         notch_menu.addSeparator()
         self._add_action(
@@ -3673,6 +3832,31 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             lambda: self._show_panel_control(panel._tone_combo, mode="FM"),
             tip="Choose the CTCSS tone or DCS code a repeater or PMR radio "
             "sends, to hear only it (FM; the Audio group in the control panel)",
+        )
+        # (M-Q3) Reverse: muted while the tone or code is heard.
+        reverse = panel._tone_reverse_check
+        reverse_action = self._add_action(
+            audio_menu,
+            "&Reverse Tone Squelch",
+            reverse.setChecked,
+            tip="Mute the stations that send the tone or code chosen in Tone "
+            "Squelch and hear every other one (CHIRP's TSQL-R and DTCS-R; FM, "
+            "the Audio group's Reverse)",
+            checkable=True,
+            checked=reverse.isChecked(),
+        )
+        reverse.toggled.connect(
+            lambda on, a=reverse_action: a.isChecked() != on and a.setChecked(on)
+        )
+        follow(reverse, reverse_action)
+        # Radios' STE: the CTCSS reverse burst closes the tone squelch.
+        self._tail_elimination_action = self._add_action(
+            audio_menu,
+            "S&quelch Tail Elimination",
+            self._set_tail_elimination,
+            tip=f"{TAIL_ELIMINATION_TIP} The Second Receiver uses it too.",
+            checkable=True,
+            checked=self._tail_elimination,
         )
         self._add_action(
             audio_menu,
@@ -3928,9 +4112,31 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._set_stereo_enabled,
             tip="Play broadcast FM in stereo where the station sends it (a "
             "weak or noisy signal blends toward mono by itself, to keep the "
-            "hiss down). Off: always mono.",
+            "hiss down). Off: always mono. (This window's: the Second Receiver "
+            "has its own Stereo switch.)",
             checkable=True,
             checked=self._stereo_enabled,
+        )
+        self._stereo_blend_actions = self._add_choice_menu(
+            audio_menu,
+            "Stereo &Blend",
+            STEREO_BLEND_CHOICES,
+            self._stereo_blend_choice,
+            self._set_stereo_blend,
+            "How far a weak or noisy broadcast FM station blends toward mono "
+            "to keep its hiss down: less (more stereo, more hiss) or more "
+            "(quieter weak stations). The Second Receiver uses it too.",
+        )
+        self._deemphasis_actions = self._add_choice_menu(
+            audio_menu,
+            "De-&emphasis",
+            DEEMPHASIS_CHOICES,
+            self._deemphasis_choice,
+            self._set_deemphasis,
+            "How much of broadcast FM's treble is cut back, as the station "
+            "lifted it: 75 µs in the Americas and South Korea, 50 µs in "
+            "Europe, Australia and most of the world (mono and stereo; other "
+            "modes have none). The Second Receiver uses it too.",
         )
         self._add_listening_menus(radio_menu, audio_menu)
         radio_menu.addSeparator()
@@ -4025,10 +4231,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Choose &Mode From Band Plan",
             lambda on: self._save_setting("tuning/band_plan_mode", bool(on)),
             tip="When you type a frequency (or pick a bookmark without a mode) "
-            "in another band, listen the way that band usually is heard: its "
-            "mode, filter and FM deviation (broadcast FM settings on a 2 m "
-            "repeater are about 23 dB too quiet). Presets and bookmarks with "
-            "a mode keep theirs",
+            "in another band, here or in the Second Receiver, listen the way "
+            "that band usually is heard: its mode, filter and FM deviation "
+            "(broadcast FM settings on a 2 m repeater are about 23 dB too "
+            "quiet). Presets and bookmarks with a mode keep theirs",
             checkable=True,
             checked=self._settings.get_bool("tuning/band_plan_mode", True),
         )
@@ -5760,12 +5966,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         blocks and picks out its own channel at the VFO, so it works
         whatever the Mode and Bandwidth are.
         """
-        from ..dsp.live_decoders import create_live_decoder, live_decoder_class
+        from ..dsp.live_decoders import (
+            LiveDecoderStatus,
+            audio_input,
+            create_live_decoder,
+            live_decoder_class,
+        )
         from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
-        # The badge's station came from the old decoder (if it was RDS).
+        # The badge's station came from the old decoder (if it was RDS), as
+        # did a busy sky's notice (a new decoder says it anew).
         self._show_rds_station(None)
+        self._say_busy_sky(None)
         if proto_value is None:
             # "Off" (or unknown): no live decoder.
             self._decoder = None
@@ -5799,6 +6012,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._decoder_panel.set_decoder_status(None)
             self._update_decoder_chip()  # (no decoder runs: no chip)
             return
+        options = getattr(getattr(playback, "device", None), "options", None)
+        if (
+            self._decoder_recording
+            and getattr(options, "audio", False)
+            and audio_input(text)
+        ):
+            # An audio recording plays as its sound turned into I/Q (0 Hz to
+            # half its rate), with no receiver's FM or AM signal in it for
+            # the decoder to demodulate: it decoded nothing (or blamed a rate
+            # too low for I/Q). Decode Recording reads it as a receiver's
+            # audio. (CW decodes its tones as they play.)
+            self._decoder = None
+            self._decoder_protocol = None
+            status = LiveDecoderStatus(
+                name=text,
+                problem=f"{text} isn't decoded from an audio recording as it plays",
+                remedy="File > Decode Recording decodes its sound as a receiver's "
+                "audio.",
+            )
+            self._decoder_panel.set_decoder_status(status)
+            self._update_decoder_chip()  # (no decoder runs: no chip)
+            if self._decoder_panel.is_decoding():
+                self._show_status_message(
+                    f"{status.problem}. {status.remedy}", "warning", 10000, log=False
+                )
+            return
         try:
             self._decoder = create_live_decoder(
                 text,
@@ -5808,8 +6047,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             self._decoder_protocol = ProtocolType(proto_value)
         except Exception as exc:
-            from ..dsp.live_decoders import LiveDecoderStatus
-
             self._decoder = None
             self._decoder_protocol = None
             problem = f"The {text} decoder could not start: {exc}"
@@ -5904,12 +6141,48 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         for msg in messages:
             self._push_decoded_message(msg)
-        self._decoder_panel.set_decoder_status(decoder.status)
+        status = decoder.status
+        self._decoder_panel.set_decoder_status(status)
+        self._say_busy_sky(status)
         self._update_decoder_chip()
         if getattr(decoder, "name", "") == "RDS":
             # The Decoder's own RDS names the station (the background
             # listener rests meanwhile).
             self._show_rds_station(decoder.station)
+
+    def _say_busy_sky(self, status: Any) -> None:
+        """ADS-B below 2.5 MS/s leaves replies unread in a very busy sky
+        (M-D2): the Decoder tab's line says so while it lasts; the status
+        bar says it once when it starts (a notice, not a problem: not in
+        Error History), and the message goes when it ends (``status``
+        None: the decoder is turned off or rebuilt). While a recording
+        plays it gives no rate to choose: whether one plays now, as the
+        Decoder tab's line has it (a recording at the device's rate keeps
+        the decoder built for the device). Nor while the Decoder tab's line
+        says the decoder misses part of the signal (this computer, the
+        device or a job of this app can't keep up, see
+        _sync_decoder_skipping): that line says what helps then, and 2.5
+        MS/s or more (no limit to the decoder's work) would only add to
+        the work (R7W-05)."""
+        from ..dsp.live_decoders import skipped_text
+
+        said = self._own("_busy_sky_said") or ""
+        playback = self._own("_playback")
+        text = skipped_text(
+            getattr(status, "skipped_per_s", 0.0) or 0.0,
+            float(getattr(status, "sample_rate", 0.0) or 0.0),
+            bool(playback is not None and playback.active)
+            or bool(self._own("_skip_hinted")),  # (no rate to choose)
+        )
+        if not text:
+            if said:
+                self._busy_sky_said = ""
+                if self._message_label.text() == said:
+                    self._clear_status_message()
+            return
+        if not said:
+            self._busy_sky_said = text
+            self._show_status_message(text, "info", 10000, log=False)
 
     def _decoder_takes_channel(
         self,
@@ -5940,6 +6213,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         sample_rate: Optional[float] = None,
         source: str = "",
         when: Any = None,
+        receiver: str = "",
+        at_s: Optional[float] = None,
     ) -> None:
         """Render one decoded message into the decoder panel.
 
@@ -5952,8 +6227,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         and ``sample_rate`` are where it was received and at what rate
         (default: the tuned frequency and the device's rate; 0 for
         unknown). ``source`` names the recording it came from (its row is
-        marked and kept out of the live views) and ``when`` is its time
-        there, when the recording says when it was made.
+        marked; the Aircraft and Text views list it with that recording's,
+        never the live ones), ``at_s`` is where in it (seconds) and ``when``
+        its time there, when the recording says when it was made.
+        ``receiver`` names another receiver it came from ("2nd RX": the
+        Second Receiver's).
         """
         try:
             address, content = self._describe_message(msg)
@@ -5986,7 +6264,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 freq_hz=freq_hz,
                 sample_rate=sample_rate,
                 source=source,
+                at_s=at_s,
                 when=when,
+                receiver=receiver,
             )
             self._note_decoded()
         except Exception as exc:  # pragma: no cover - defensive
@@ -6306,13 +6586,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         ``lead``: what the tune itself says first ("Playing fm8.sigmf-data
         (99.6–100.6 MHz)", a recording opened), so one message says both."""
-        from ..core.band_plan import (
-            band_for,
-            preset_for,
-            preset_listening,
-            segment_listening,
-        )
-
         zone = self._band_plan_zone(freq_hz)
         # The message about the band you came from no longer applies
         # (LISTEN-13: "2m Ham: listening in FM ..." stayed at 446.1 MHz).
@@ -6324,6 +6597,47 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         action = self._own("_band_plan_action")
         if action is not None and not action.isChecked():
             return False
+        mode, deviation = self._listening_mode()
+        change = self._band_plan_listening(before_hz, freq_hz, mode, deviation)
+        if change is None:
+            return False
+        (target, target_deviation, target_width), name, where = change
+        self._quiet_mode_change = True  # (this says how instead)
+        try:
+            self._set_demod_mode(target, target_deviation or None, target_width or None)
+        finally:
+            self._quiet_mode_change = False
+        how = self._band_plan_how(target, self._control_panel.get_fm_deviation_text())
+        text = (
+            f"{name}: listening in {how} with a "
+            f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
+            "usually heard (Radio > Choose Mode From Band Plan)"
+        )
+        text = self._keeping_release_note(text)
+        if lead:
+            text = f"{lead} · {text}"
+        self._show_status_message(text, "info", 8000 if lead else 6000)
+        self._band_plan_note = (text, zone)
+        return True
+
+    @classmethod
+    def _band_plan_listening(
+        cls, before_hz: float, freq_hz: float, mode: str, deviation: str
+    ) -> Optional[Tuple[Tuple[str, str, str], str, str]]:
+        """How to listen after a far tune from ``before_hz`` to ``freq_hz``
+        while listening in ``mode`` (FM at ``deviation``, e.g. "5 kHz"), by
+        the band plan: ``((mode, FM deviation, filter), name, where)``, with
+        the preset channel, segment or band it is heard as and "this
+        channel", "this part of the band" or "the band"; None where the
+        current mode stays. The rule of :meth:`_listen_by_band_plan`, which
+        the Second Receiver's Frequency follows too."""
+        from ..core.band_plan import (
+            band_for,
+            preset_for,
+            preset_listening,
+            segment_listening,
+        )
+
         band = band_for(freq_hz)
         # A preset channel is heard the preset's way (7.030 MHz, QRP 40m
         # CW: in CW, though 40 m is an LSB band; 446.000 MHz, 70cm
@@ -6342,55 +6656,67 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             heard, name, where = band.listening, band.name, "the band"
             kind = "band"
         else:
-            return False
-        target, target_deviation, target_width = heard
-        if band is not None and self._band_plan_zone(before_hz) == zone:
-            return False  # the same band (and segment): your mode stays
-        mode, deviation = self._listening_mode()
-        broadcast = _BROADCAST_FM_DEVIATION
+            return None
+        target, target_deviation, _width = heard
+        zone = cls._band_plan_zone(freq_hz)
+        if zone != ("", "") and cls._band_plan_zone(before_hz) == zone:
+            # The same band (and segment), or the neighbourhood of a preset
+            # channel outside every band (a click off POCSAG's channel and
+            # back): your mode stays.
+            return None
         if mode == target:
             # FM at another deviation is not: FRS's 2.5 kHz clipped a 2 m
             # repeater (5 kHz), and a satellite's 25 kHz left it quiet.
             if mode != "FM" or deviation == target_deviation:
-                return False  # already listening that way
+                return None  # already listening that way
         elif mode == "USB" and (
             target == "LSB" or (target == "CW" and kind != "preset")
         ):
             # USB stays: the digital modes (FT8, RTTY...) are USB on every
             # band, 40 m too, and in the CW/data segments. (LSB in a USB band
             # does switch: voice above 10 MHz and data are USB.)
-            return False
-        elif mode == "CW" and kind != "data" and self._segment_allows_cw(freq_hz):
-            return False  # Morse code in a CW segment stays CW (not on FT8)
-        self._quiet_mode_change = True  # (this says how instead)
-        try:
-            self._set_demod_mode(target, target_deviation or None, target_width or None)
-        finally:
-            self._quiet_mode_change = False
-        how = self._mode_text(target)
-        if target == "FM":
-            fm = "broadcast" if target_deviation == broadcast else "narrow"
-            how = f"FM ({fm}, {self._control_panel.get_fm_deviation_text()} deviation)"
-        text = (
-            f"{name}: listening in {how} with a "
-            f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
-            "usually heard (Radio > Choose Mode From Band Plan)"
-        )
-        text = self._keeping_release_note(text)
-        if lead:
-            text = f"{lead} · {text}"
-        self._show_status_message(text, "info", 8000 if lead else 6000)
-        self._band_plan_note = (text, zone)
-        return True
+            return None
+        elif mode == "CW" and kind != "data" and cls._segment_allows_cw(freq_hz):
+            return None  # Morse code in a CW segment stays CW (not on FT8)
+        return heard, name, where
+
+    @classmethod
+    def _band_plan_how(cls, mode: str, deviation: str) -> str:
+        """How the band plan's message names the way a receiver now listens
+        (both windows'): the mode ("AM", "I/Q"), FM with the deviation in
+        the FM deviation list's own words (its table, FM_DEVIATIONS: "FM
+        (wide voice, 12.5 kHz deviation)" for "12.5 kHz (wide voice)")."""
+        if mode != "FM" or not deviation:
+            return cls._mode_text(mode)
+        shown = {value: text for value, text, _tip in FM_DEVIATIONS}
+        _value, _, words = shown.get(deviation, "").partition(" (")
+        if not words.endswith(")"):
+            return f"FM ({deviation} deviation)"
+        return f"FM ({words[:-1]}, {deviation} deviation)"
 
     @staticmethod
     def _band_plan_zone(freq_hz: float) -> Tuple[str, str]:
         """The band and, in an amateur band, the part of it (an FT8
         channel, the CW/data segment) ``freq_hz`` is in: a mode chosen
-        there stays while you tune within it."""
-        from ..core.band_plan import band_for, segment_listening
+        there stays while you tune within it. Outside every band, the
+        neighbourhood of a preset channel there (POCSAG 152.240 MHz, its
+        channel width either side): ``("", preset name)``; elsewhere
+        ``("", "")``, no place at all."""
+        from ..core.band_plan import band_for, preset_for, segment_listening
+        from ..core.frequency_manager import RX_PRESETS
 
         band = band_for(freq_hz)
+        if band is None:
+            near = [
+                (abs(freq_hz - preset.frequency_hz), str(preset.name))
+                for preset in RX_PRESETS
+                if abs(freq_hz - preset.frequency_hz) <= preset.bandwidth_hz
+                # (A channel preset, not a whole band's, itself outside
+                # every band.)
+                and preset_for(preset.frequency_hz) is preset
+                and band_for(preset.frequency_hz) is None
+            ]
+            return "", min(near)[1] if near else ""
         segment = segment_listening(freq_hz)
         return (
             band.name if band is not None else "",
@@ -6436,11 +6762,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         bandwidth_hz: Optional[float] = None,
     ) -> bool:
         """Whether the tuned channel, ``offset_hz`` from the LO, lies inside
-        the usable inner part (``_USABLE_SPAN_FRACTION``) of a span of
-        ``rate`` Hz (the device's). At the LO itself it always does (a
-        channel wider than that is best centered). ``mode`` and
-        ``bandwidth_hz``: a channel in that mode and width instead of the
-        one tuned."""
+        the usable inner part (``_USABLE_SPAN_FRACTION``, or the device's
+        ``usable_fraction``) of a span of ``rate`` Hz (the device's). At the
+        LO itself it always does (a channel wider than that is best
+        centered). ``mode`` and ``bandwidth_hz``: a channel in that mode and
+        width instead of the one tuned."""
         if abs(offset_hz) < 0.5:
             return True
         rate = float(rate or self._device_sample_rate())
@@ -6449,7 +6775,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             bandwidth_hz or self._channel_bandwidth(),
             rate,
         )
-        half = 0.5 * _USABLE_SPAN_FRACTION * rate
+        usable = getattr(self._own("_device"), "usable_fraction", None)
+        if not isinstance(usable, (int, float)) or not 0 < usable <= 1:
+            usable = _USABLE_SPAN_FRACTION
+        half = 0.5 * usable * rate
         return -half <= offset_hz + low and offset_hz + high <= half
 
     def _lo_for(self, freq_hz: float) -> float:
@@ -6509,14 +6838,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Let the Frequency field accept the connected device's range (its
         tooltip and messages say what it is), and the span of a recording
         playing back even where it lies above (a 10 GHz downlink: then they
-        say what the recording covers, not that the receiver tunes there)."""
+        say what the recording covers, not that the receiver tunes there)
+        or below (a one-channel file's, from 0 Hz)."""
         low, high = self._tuning_limits()
         text = self._range_text() if self._device_tuning_range() else ""
         if self._lo_lock is not None:
             center, span, why = self._lo_lock
-            if center + span / 2 > high:
-                high = center + span / 2
-                text = f"{why} covers {format_mhz_range(center - span / 2, high)}"
+            bottom, top = center - span / 2, center + span / 2
+            if top > high or bottom < low:
+                high = max(high, top)
+                low = min(low, max(_LOWEST_PLAYBACK_HZ, bottom))
+                text = f"{why} covers {format_mhz_range(max(0.0, bottom), top)}"
         self._control_panel._freq_input.set_tuning_range(low, high, text)
 
     def _device_frequency(self) -> Optional[float]:
@@ -6615,8 +6947,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         low, high = self._tuning_limits()
         if self._lo_lock is not None:
             # A recording plays: nothing is retuned, so its span (checked
-            # below) may lie above the receiver's range.
-            high = math.inf
+            # below) may lie above the receiver's range, or below it (a
+            # one-channel file's starts at 0 Hz).
+            low, high = min(low, _LOWEST_PLAYBACK_HZ), math.inf
         if not low <= freq <= high:
             return self._refuse_tuning(
                 f"{format_frequency(freq)} is out of range: {self._range_text()}."
@@ -7139,6 +7472,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.audio_agc_changed.connect(self._on_audio_agc_changed)
         panel.tone_squelch_changed.connect(self._on_tone_squelch_changed)
         panel.dcs_squelch_changed.connect(self._on_dcs_squelch_changed)
+        panel.tone_reverse_changed.connect(self._on_tone_reverse_changed)
         panel.notch_changed.connect(self._on_notch_changed)
         panel.low_cut_changed.connect(self._on_low_cut_changed)
         panel.iq_options_changed.connect(self._on_iq_options_changed)
@@ -7178,6 +7512,60 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._save_setting("audio/dcs_squelch", str(code or ""))
         if code:
             self._say_tone_squelch_unused()
+
+    def _on_tone_reverse_changed(self, reverse: bool) -> None:
+        """(M-Q3) The tone squelch reversed: muted while its tone or code is
+        heard, every other station plays (CHIRP's TSQL-R and DTCS-R)."""
+        tones = self._tone_squelch
+        tones.reverse = bool(reverse)
+        self._save_setting("audio/tone_reverse", bool(reverse))
+        if self._restoring or self._quiet_reverse or not tones.active:
+            return
+        if tones.dcs is not None:
+            what = dcs_label(*tones.dcs)
+        else:
+            what = f"the {float(tones.tone_hz or 0.0):.1f} Hz tone"
+        if reverse:
+            text = (
+                f"Reverse tone squelch: stations sending {what} are muted, "
+                "every other station plays."
+            )
+        else:
+            text = f"Tone squelch: only stations sending {what} play."
+        self._show_status_message(text, "info", 4000)
+        self._say_tone_squelch_unused()
+
+    def _set_tail_elimination(self, on: bool) -> None:
+        """Radio > Audio > Squelch Tail Elimination (radios' STE): whether a
+        CTCSS station's reverse burst closes the tone squelch before its
+        squelch tail (M-Q2), as heard and for Scan Bookmarks, which judges
+        a channel by the same tone squelch. Saved at once. A DCS code's
+        turn-off code closes it either way (part of the DCS standard, and no
+        voice was heard to fake it). The Second Receiver follows it."""
+        on = bool(on)
+        action = getattr(self, "_tail_elimination_action", None)
+        if action is not None and action.isChecked() != on:
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
+        if on == self._tail_elimination:
+            return
+        self._tail_elimination = on
+        self._tone_squelch.tail_elimination = on
+        self._settings.set(_TAIL_ELIMINATION_KEY, on)
+        self._second_rx_follows_audio()
+        self._show_status_message(
+            (
+                "Squelch tail elimination on: a CTCSS station's reverse burst "
+                "closes the squelch before its tail."
+                if on
+                else "Squelch tail elimination off: CTCSS stations play until "
+                "their carrier drops, squelch tail too."
+            ),
+            "info",
+            4000,
+            log=False,  # (what was asked: no problem)
+        )
 
     def _say_tone_squelch_unused(self) -> None:
         """A tone or code chosen at a broadcast deviation: say it isn't
@@ -7313,6 +7701,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             panel.set_dcs_squelch(*code)
 
         restore("audio/dcs_squelch", dcs_squelch)
+        restore(
+            "audio/tone_reverse",
+            lambda: panel.set_tone_reverse(
+                settings.get_bool("audio/tone_reverse", False)
+            ),
+        )
 
         def notch_hz() -> None:
             hz = settings.get_int("audio/notch_hz", DEFAULT_NOTCH_HZ)
@@ -7354,6 +7748,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         hz = panel.tone_squelch_hz()
         self._tone_squelch.tone_hz = hz if hz else None
         self._tone_squelch.dcs = panel.dcs_squelch()
+        self._tone_squelch.reverse = panel.tone_reverse()
         self._audio_options.tone_squelch = self._tone_squelch.active
         self._audio_options.notch = panel.notch_mode()
         self._audio_options.notch_hz = float(panel.notch_hz())
@@ -7376,6 +7771,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         settings.set("audio/tone_squelch", panel.tone_squelch_hz())
         dcs = panel.dcs_squelch()
         settings.set("audio/dcs_squelch", format_dcs(*dcs) if dcs else "")
+        settings.set("audio/tone_reverse", panel.tone_reverse())
         settings.set("audio/notch", panel.notch_mode())
         settings.set("audio/notch_hz", panel.notch_hz())
         settings.set("audio/low_cut", panel.low_cut())
@@ -7407,6 +7803,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         dcs = self._tone_squelch.dcs if mode == "FM" else None
         if dcs is not None:
             tone = f", {dcs_label(*dcs)}"
+        if tone and self._tone_squelch.reverse:
+            tone = f", reverse {tone[2:]}"  # (muted while it is heard)
         if not gate.enabled:
             return f"Off (everything plays){tone}", None
         threshold = gate.last_threshold_db
@@ -8608,8 +9006,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._sync_audio_record_ui()
             return False
         freq = self._current_frequency()
+        # (An audio recording's sound is named after the recording: the
+        # 1 Hz it is listened from said "0.000MHz".)
+        played = self._playback.device
+        source = played.options.name if played and played.options.audio else ""
         path = file_dialogs.unique_path(
-            folder, audio_file_name(freq, self._mode_text(mode))
+            folder, audio_file_name(freq, self._mode_text(mode), source=source)
         )
         # A stereo WAV where stereo can play (broadcast FM with Radio >
         # Audio > Stereo on); its mono stretches play on both channels.
@@ -8641,6 +9043,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             note = " It starts with the receiver (Space)."
         elif not self._audio_enabled:
             note = " (The speaker is off; the recording still gets the audio.)"
+        note += self._take_pace_note()
         kind = "stereo audio" if stereo else "audio"
         self._show_status_message(
             f"Recording {kind} to {os.path.basename(path)}.{note}", "info", 5000
@@ -8724,14 +9127,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             label.setText(f"AUDIO {clock}")
             set_tone(label, "danger")
             label.setToolTip(
-                f"Recording what you hear to {where}. Radio > Record Audio "
-                "(Ctrl+Shift+A) stops it."
+                f"Recording what you hear to {where}.{self._take_pace_note()} "
+                "Radio > Record Audio (Ctrl+Shift+A) stops it."
             )
         if self._record_kind() == "audio":
             self._control_panel.update_record_time(int(take.seconds))
             self._sync_recording_armed()
         else:  # (named in the group's status line)
             self._sync_other_recording()
+
+    def _take_pace_note(self) -> str:
+        """While a recording plays at another speed: an audio take keeps
+        the recording's own pace (M-P1). What was received is recorded as
+        it was, 10 s of it making 10 s of audio: not the speaker's sound,
+        stretched to a speed that can change during the take (and slows on
+        a computer that can't keep up). "" otherwise."""
+        speed = float(self._playback.speed) if self._playback.active else 1.0
+        if speed == 1.0:
+            return ""
+        return (
+            f" It keeps the recording's own pace, not {speed:g}x (10 s of the "
+            "recording make 10 s of audio)."
+        )
 
     def _record_audio_block(
         self, audio: Optional[np.ndarray], open_: bool, seconds: float, joined: bool
@@ -8955,6 +9372,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         paced = bool(getattr(self._device, "paced", False))
         samples = self._read_block()
         if samples is None or len(samples) == 0:
+            if paced:
+                self._between_blocks()
             self._stream_died()
             return
         # A recording's read waits for the disk: no measure of what this
@@ -9330,7 +9749,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.debug("Could not show the passband: %s", exc)
 
     def _note_block(self, count: int) -> None:
-        """Remember when samples arrived (for ``_realtime``)."""
+        """Remember when samples arrived (for ``_realtime``). The read that
+        found the end of a recording counts as the read it was: short
+        because the file ends there, it said nothing of the rate (8 kHz
+        audio at 0.5x: a last block under half of one muted its own sound,
+        as for a device that can't keep up)."""
+        if self._playback.active:
+            count += int(getattr(self._device, "short_by", 0))
         now = time.monotonic()
         history = self._rx_history
         history.append((now, int(count)))
@@ -9341,11 +9766,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Whether the device delivers (close to) its full sample rate.
 
         True until there is a second of history to judge by. A recording
-        playing faster or slower than real time isn't (its audio would
-        stutter): audio plays at 1x only.
+        playing faster or slower than real time is judged at its speed
+        (M-P1): its sound follows the pace it really plays at (see
+        _speak), down to half of real time (half of 0.5x at 0.5x); slower
+        than that the audio pauses, as at 1x.
         """
-        if self._playback.active and self._playback.speed != 1.0:
-            return False
         history = self._rx_history
         if len(history) < 2:
             return True
@@ -9353,14 +9778,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if span < 1.0:
             return True
         received = sum(count for _t, count in list(history)[1:])
-        return received >= _REALTIME_FRACTION * self._device_sample_rate() * span
+        fraction = _REALTIME_FRACTION
+        if self._playback.active:
+            fraction *= min(1.0, float(self._playback.speed))
+        return received >= fraction * self._device_sample_rate() * span
 
     def _audio_held(self) -> bool:
         """Whether nobody can hear the receiver now, whatever the Audio
         button's switch: the Second Receiver's Listen plays only that
-        receiver, or the audio is paused (a recording playing faster than
-        real time, a computer that can't keep up). With the speaker on,
-        the Audio button says which (see _audio_state)."""
+        receiver, or the audio is paused (a computer that can't keep up,
+        a recording playing below half of real time). With the speaker
+        on, the Audio button says which (see _audio_state)."""
         second = getattr(self, "_second_rx", None)
         if second is not None and second.mutes_main():
             return True
@@ -9623,6 +10051,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         mode = chain.mode
         audible = mode in _AUDIBLE_MODES
         seconds = len(channel) / max(chain.channel_rate, 1.0)
+        if self._playback.active:
+            # (The pace the recording really plays at, which its sound
+            # follows: every frame, the squelch open or not.)
+            self._playback_sound.note(seconds, time.monotonic(), self._playback.speed)
         gate_level = level_db
         if len(channel):
             level_db = channel_power_db(channel)
@@ -9720,14 +10152,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 chain.reset_demodulator()
                 self._tone_squelch.reset()
                 self._demod_running = False
-                self._clip_s = 0.0
+                self._clip_warning.reset()
                 # (Nothing is notched while nothing plays.)
                 self._control_panel.show_notch_found(None)
             self._tone_blocked = False
             if self._audio_join.playing:
                 # (Another mode with no audio: no block to fade out.)
-                self._audio.write(self._audio_join.release())
+                self._speak(self._audio_join.release(), last=True)
             self._show_detected_tone()
+            self._update_squelch_lamp(level_db, noise_db, audible)
             if recording:
                 self._record_audio_block(None, False, seconds, False)
             self._show_stereo(chain, received)  # (Stereo off: MONO)
@@ -9741,7 +10174,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             chain.reset_demodulator()
             self._demod_running = False
             if self._audio_join.playing:
-                self._audio.write(self._audio_join.release())
+                self._speak(self._audio_join.release(), last=True)
             if recording:
                 self._record_audio_block(None, False, seconds, False)
             self._show_stereo(chain, False)
@@ -9749,7 +10182,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demod_running = True
         if self._audio_options.notch == "auto":
             # (What Auto removes, next to the Notch choice.)
-            self._control_panel.show_notch_found(chain.notch_frequency_hz)
+            self._control_panel.show_notch_found(chain.notch_frequencies_hz)
         # Broadcast FM in stereo: left and right while there is stereo to
         # play (the mono audio, (L+R)/2, is what everything else hears).
         heard = audio if chain.stereo_audio is None else chain.stereo_audio
@@ -9760,7 +10193,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # (broadcast stations send none: not looked for unless asked).
             tones = self._tone_squelch
             tuned = self._current_frequency()
-            if tuned != self._tone_channel:
+            # A signal the squelch has just opened on is judged afresh, as
+            # it is when demodulating stopped while the squelch was closed:
+            # Record Audio (or SSTV) keeps demodulating, and the noise
+            # before the signal let a reverse tone squelch play the station
+            # it mutes for its first half second (M-Q3).
+            opened = bool(gate.is_open) and not self._tone_gate_open
+            self._tone_gate_open = bool(gate.is_open)
+            if tuned != self._tone_channel or opened:
                 # Another channel: its tone (if any) must be heard anew.
                 # The last second of the old channel's audio kept a tone
                 # squelch open on a channel without the tone for 0.9 s.
@@ -9769,7 +10209,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._tone_blocked = False
             if self._tones_checked(deviation):
                 tones.feed_dcs(chain.fm_raw_audio)  # (DCS: before DC blocking)
-                if not tones.process(chain.pre_nr_audio):
+                # A reverse tone squelch opens on a carrier that is there, not
+                # on the noise the squelch's hang lets through after one
+                # dropped: the station it mutes, tuned (or scanned) in the
+                # last half second of a transmission, played its squelch
+                # tail and was a bookmark scan's hit (R7W-01, R7W-03).
+                carrier = bool(gate.is_open) and not gate.hanging
+                if not tones.process(chain.pre_nr_audio, carrier):
                     tone_ok = False
                     self._tone_blocked = True
                     speaker = False
@@ -9783,6 +10229,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # before mustn't leave its verdict for the Scanner and the meter).
             self._tone_blocked = False
         self._show_detected_tone()
+        self._update_squelch_lamp(level_db, noise_db, audible)
         join = self._audio_join
         nr = self._audio_options.noise_reduction
         # A new chain, deviation or noise reduction: the audio doesn't
@@ -9809,11 +10256,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 out = join.play(heard)  # fades in after silence
             self._join_chain, self._join_deviation = chain, deviation
             self._join_nr = nr
-            self._audio.write(out)
+            self._speak(out)
         elif join.playing:
             # Stopping: fade this block out, or (if it doesn't continue the
             # last one) decay from the last sample played.
-            self._audio.write(join.release() if new_stream else join.fade_out(heard))
+            self._speak(
+                join.release() if new_stream else join.fade_out(heard), last=True
+            )
         if sstv:
             try:
                 self._sstv_panel.process_audio(
@@ -9821,6 +10270,69 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("SSTV decoder failed: %s", exc)
+
+    def _speak(self, audio: np.ndarray, last: bool = False) -> None:
+        """Give the speaker ``audio`` (mono or ``(n, 2)``, as the fades
+        made it): as it is, or, while a recording plays, time-stretched to
+        the pace it really plays at, its pitch kept (M-P1: PlaybackSound;
+        at 1x while it keeps up, the same block). ``last``: the sound
+        stops after this block (the squelch closed, the speaker stopped,
+        the stream broke off): what the stretch still holds plays with it.
+        Once the recording's end was read (Loop off), what is held plays
+        out as the speaker plays it, at the speed chosen (see
+        _between_blocks). Everything else (Record Audio, SSTV, the
+        decoders) keeps the recording's own pace."""
+        sound = self._playback_sound
+        if self._playback.active or sound.holding:
+            now = time.monotonic()
+            device = self._playback.device
+            if device is not None and device.finished:
+                audio = sound.play(audio, now, last=last, end=True)
+            else:
+                audio = sound.play(audio, now, last=last)
+        self._audio.write(audio)
+
+    def _between_blocks(self) -> None:
+        """A display frame that read nothing of a playing recording: one
+        slower than a display block a frame (a one-channel file of 8 kHz
+        audio is 4 kS/s of I/Q, a block every half second at 1x, every
+        second at 0.5x). The pace its sound follows counts the frame, and
+        at another speed the speaker gets what the time-stretch holds for
+        it (M-P1 with M-F2: given out only with each block, a quarter of a
+        second at most, the sound of such a file ran dry most of the time
+        at 0.5x), at 1x what the last block has still to give, as it is
+        (handed over whole, half a second of it, the speaker ran dry or
+        dropped some about twice a second). A sound nobody hears any more
+        (the speaker off, the Second Receiver's Listen) ends here, as the
+        next block would end it: what is held, faded out, and nothing
+        after it (with that block, up to a second later at 0.5x, it came
+        back for a moment after it had stopped). At the end of a
+        recording (Loop off) what is held plays out at the speed chosen,
+        the decay from its last sample right after the last of it, and the
+        playback stops at its next tick, which waits for that. (Stopped as
+        soon as the end was read, the end of 8 kHz audio was cut short at
+        1x, and at another speed what the time-stretch held was rushed
+        out: its last 0.3 s at 0.5x in 0.05 s. And the decay waited for
+        that tick, up to 0.2 s, often after the speaker had run dry.)"""
+        if not self._playback.active:
+            return
+        sound = self._playback_sound
+        now = time.monotonic()
+        sound.note(0.0, now, self._playback.speed)
+        join = self._audio_join
+        if not join.playing:
+            return
+        second = getattr(self, "_second_rx", None)
+        if not self._audio_enabled or (second is not None and second.mutes_main()):
+            if sound.holding:
+                self._speak(np.zeros(0, dtype=np.float32), last=True)
+                join.stop()
+            return
+        audio = sound.more(now)
+        if len(audio):
+            self._audio.write(audio)
+        if getattr(self._device, "finished", False) and not sound.rest_s:
+            self._speak(join.release(), last=True)
 
     def _set_stereo_enabled(self, on: bool) -> None:
         """Radio > Audio > Stereo (K-S1): broadcast FM in stereo where the
@@ -9846,6 +10358,110 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             4000,
             log=False,  # (what was asked: no problem)
         )
+
+    def _saved_choice(
+        self, key: str, choices: Tuple[Tuple[str, str, str], ...], default: str
+    ) -> str:
+        """The saved key of one of ``choices`` (``(key, label, tip)``; case
+        and spaces aside), or ``default`` for anything else (a damaged
+        setting: logged)."""
+        raw = self._settings.get_str(key, default)
+        value = str(raw).strip().lower()
+        for choice, _label, _tip in choices:
+            if value == choice.lower():
+                return choice
+        logger.warning(
+            f"Ignoring the damaged setting {key}={raw!r}: using {default!r} instead."
+        )
+        return default
+
+    def _add_choice_menu(
+        self,
+        menu: Any,
+        title: str,
+        choices: Tuple[Tuple[str, str, str], ...],
+        current: str,
+        slot: Any,
+        tip: str,
+    ) -> Dict[str, Any]:
+        """A submenu of exclusive checkable items, one per ``(key, label,
+        tip)`` of ``choices`` (``current`` checked); choosing one calls
+        ``slot(key)``. Returns the actions by key."""
+        submenu = menu.addMenu(title)
+        submenu.setToolTipsVisible(True)
+        submenu.menuAction().setToolTip(tip)
+        submenu.menuAction().setStatusTip(tip)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        actions: Dict[str, Any] = {}
+        for key, label, choice_tip in choices:
+            action = self._add_action(
+                submenu,
+                f"&{label}",
+                lambda on, k=key: on and slot(k),
+                tip=choice_tip,
+                checkable=True,
+                checked=key == current,
+            )
+            group.addAction(action)
+            actions[key] = action
+        return actions
+
+    @staticmethod
+    def _check_choice(actions: Dict[str, Any], key: str) -> None:
+        action = actions.get(key)
+        if action is not None and not action.isChecked():
+            action.blockSignals(True)
+            action.setChecked(True)  # (its group unchecks the others)
+            action.blockSignals(False)
+
+    def _set_deemphasis(self, key: str) -> None:
+        """Radio > Audio > De-emphasis (M-A1): 75 µs (the Americas, South
+        Korea) or 50 µs (Europe, Australia, most of the world). Saved at
+        once; broadcast FM takes it on the next block (its audio filters
+        crossfade in 10 ms: no click), mono and stereo alike, and with it
+        Record Audio, the radio tuner's station and the Second Receiver."""
+        key = str(key).strip()  # (as a choice's key: "75" or "50")
+        seconds = deemphasis_seconds(key)
+        if seconds is None:
+            return
+        self._check_choice(getattr(self, "_deemphasis_actions", {}), key)
+        if key == self._deemphasis_choice:
+            return
+        self._deemphasis_choice = key
+        self._audio_options.deemphasis_s = seconds
+        self._settings.set(_DEEMPHASIS_KEY, key)
+        self._second_rx_follows_audio()
+        self._show_status_message(
+            deemphasis_note(key), "info", 4000, log=False  # (what was asked)
+        )
+
+    def _set_stereo_blend(self, key: str) -> None:
+        """Radio > Audio > Stereo Blend (M-A2): how far a weak station
+        blends toward mono, Less, Normal or More. Saved at once; the stereo
+        decoder's thresholds move to it over 20 ms (the Second Receiver's
+        too)."""
+        key = str(key).strip().lower()  # (as a choice's key)
+        if usable_blend(key) != key:
+            return
+        self._check_choice(getattr(self, "_stereo_blend_actions", {}), key)
+        if key == self._stereo_blend_choice:
+            return
+        self._stereo_blend_choice = key
+        self._audio_options.stereo_blend = key
+        self._settings.set(_STEREO_BLEND_KEY, key)
+        self._second_rx_follows_audio()
+        self._show_status_message(
+            stereo_blend_note(key), "info", 4000, log=False  # (what was asked)
+        )
+
+    def _second_rx_follows_audio(self) -> None:
+        """De-emphasis, Stereo Blend and Squelch Tail Elimination are for
+        both receivers: the Second Receiver (if opened) takes the change up
+        (it takes them up when it opens)."""
+        second = getattr(self, "_second_rx", None)
+        if second is not None:
+            second.follow_audio()
 
     def _show_stereo(self, chain: Optional["_ReceiverChain"], received: bool) -> None:
         """The receiver bar's STEREO / MONO badge and the radio tuner's
@@ -9874,6 +10490,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 lit = blend >= _STEREO_ON_BLEND or (
                     self._stereo_lit and blend >= _STEREO_OFF_BLEND
                 )
+                # (What a blended or mono station is heard with.)
+                setting = (
+                    f"Radio > Audio > Stereo Blend: {decoder.blending.capitalize()}"
+                )
                 if lit:
                     text, tone = "STEREO", "success"
                     tip = (
@@ -9881,7 +10501,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                         "and right are fully apart."
                         if blend >= 0.95
                         else "Stereo, blended partly toward mono to keep the hiss "
-                        "down: the signal is a little weak."
+                        f"down: the signal is a little weak ({setting})."
                     ) + " Radio > Audio > Stereo switches stereo off."
                 elif not decoder.pilot:
                     tip = (
@@ -9891,10 +10511,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 elif decoder.target >= _STEREO_ON_BLEND:
                     tip = "Mono for a moment: stereo is coming in."
                 else:
+                    # (Under half the stereo difference: MONO, but say so
+                    # when some of it still plays.)
+                    heard = (
+                        "Nearly mono: the signal is too weak for clean stereo, "
+                        "so it is blended most of the way toward mono"
+                        if blend > _NEARLY_MONO_BLEND
+                        else "Mono: the signal is too weak for clean stereo, so "
+                        "it plays in mono"
+                    )
                     tip = (
-                        "Mono: the signal is too weak for clean stereo, so it "
-                        "plays in mono to keep the hiss down. Stereo comes back "
-                        "as the signal gets stronger."
+                        f"{heard} to keep the hiss down ({setting}). Stereo "
+                        "comes back as the signal gets stronger."
                     )
         self._stereo_lit = text == "STEREO"
         shown = (text, tone, tip)
@@ -9950,6 +10578,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return "idle"
         gate = self._squelch
         if gate.is_open and self._tone_blocked:
+            if self._tone_squelch.reverse:
+                return "reverse"  # (M-Q3) its tone or code is heard, or may be
             return "tone"  # a signal, but not the chosen CTCSS tone or DCS code
         if not gate.enabled:
             return "off"
@@ -9967,6 +10597,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._squelch_state(audible),
             gate.auto and noise_db is not None,
         )
+
+    def _update_squelch_lamp(
+        self, level_db: float, noise_db: Optional[float], audible: bool
+    ) -> None:
+        """The lamp again once the block's tone gate has run (the meter is
+        set before it, with the last block's verdict: a station the tone
+        squelch mutes read OPEN for a frame as it keyed up, and one a
+        reverse tone squelch lets through read TONE as it began to play)."""
+        if self._level_meter.state() != self._squelch_state(audible):
+            self._update_level_meter(level_db, noise_db, audible)
 
     def _tones_checked(self, deviation: float) -> bool:
         """Whether FM audio is searched for a CTCSS tone: below a broadcast
@@ -9994,54 +10634,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         more than the FM deviation setting, which distorts it. Only a clear
         signal counts: noise (a squelch tail, an empty channel with the
         squelch off) clips whatever the setting. The warning names the
-        deviation that holds the swing measured while it clipped."""
-        clear = snr_db is not None and snr_db >= _CLIP_MIN_SNR_DB
-        if clear and chain.last_clip_fraction > _CLIP_FRACTION:
-            if self._clip_s <= 0.0:
-                self._clip_swings.clear()  # (a new episode)
-            self._clip_s += seconds
-            # (In Hz: the deviation may be changed while it clips.)
-            deviation = float(self._control_panel.get_fm_deviation())
-            peak, often = chain.clip_swing()
-            self._clip_swings.append((peak * deviation, often * deviation))
-        else:
-            self._clip_s = max(0.0, self._clip_s - seconds)
+        deviation that holds the swing measured while it clipped. (The rule
+        is the Second Receiver's too: audio_chain.ClipWarning.)"""
+        panel = self._control_panel
+        warning = self._clip_warning
+        if not warning.update(chain, panel.get_fm_deviation(), seconds, snr_db):
             return
-        now = time.monotonic()
-        if self._clip_s < _CLIP_WARN_AFTER_S or now < self._clip_warn_due:
-            return
-        self._clip_warn_due = now + _CLIP_WARN_EVERY_S
-        self._clip_s = 0.0
-        current = self._control_panel.get_fm_deviation_text()
-        text = f"FM audio is clipping: this station deviates more than {current}"
-        holds = self._deviation_holding_clip(self._control_panel.get_fm_deviation())
-        if holds == "75 kHz":
-            text += (
-                ". Choose a larger FM deviation in Demodulation, such as 75 kHz "
-                "(broadcast) for an FM radio station."
-            )
-        elif holds:
-            text += f". Choose a larger FM deviation in Demodulation: {holds} holds it."
-        else:
-            text += ", the largest FM deviation offered."
+        text = warning.text(
+            panel.get_fm_deviation(), current=panel.get_fm_deviation_text()
+        )
         self._show_status_message(text, "warning", 8000)
-
-    def _deviation_holding_clip(self, deviation_hz: float) -> str:
-        """The FM deviation choice that holds the swing measured while the
-        audio clipped at ``deviation_hz`` (the rule Identify suggests one
-        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
-        kHz), at least the next larger choice; "" when none is larger."""
-        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
-
-        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
-        if not larger:
-            return ""
-        swings = np.asarray(self._clip_swings, dtype=float).reshape(-1, 2)
-        if not len(swings):
-            return larger[0]
-        peak, often = np.median(swings, axis=0)
-        holds = _deviation_for(float(peak), float(often))
-        return holds if holds in larger else larger[0]
 
     def _follow_realtime_hint(self) -> None:
         """While audio stays paused and the status bar still says why, it
@@ -10075,11 +10677,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return bool(history) and self._overloaded_at >= history[0][0]
 
     def _realtime_hint(self) -> str:
-        if self._playback.active and self._playback.speed != 1.0:
-            return (
-                f"Playing at {self._playback.speed:g}x: audio plays at 1x only "
-                "(the spectrum, decoders and recordings keep working)."
-            )
+        # (A recording's sound plays at every speed now, M-P1: it pauses
+        # only below half of real time, for the reasons below.)
         job = self._busy_job_now()
         if job and busy_with() != job:  # (done: what it skipped still counts)
             return (
@@ -10090,16 +10689,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return f"{job} keeps this computer busy, so audio is paused meanwhile."
         if self._playback.active:
             # (A recording's rate can't be changed while it plays: no advice
-            # to lower it. N-02)
+            # to lower it. N-02) Below 1x, judged at the speed chosen.
+            speed = float(self._playback.speed)
+            pace = "in real time" if speed >= 1.0 else f"at {speed:g}x"
             if self._computer_behind():
                 return (
                     "This computer can't process the recording's "
-                    f"{format_rate(self._device_sample_rate())} in real time "
+                    f"{format_rate(self._device_sample_rate())} {pace} "
                     "right now, so audio is paused until it catches up. "
                     "Closing other programs may help."
                 )
             return (
-                "The recording isn't playing in real time right now, so audio "
+                f"The recording isn't playing {pace} right now, so audio "
                 "is paused until it catches up."
             )
         if self._demo_mode:
@@ -10130,13 +10731,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._squelch.reset()
         self._level_average.reset()
         if self._audio_join.playing:
-            self._audio.write(self._audio_join.release())
+            self._speak(self._audio_join.release(), last=True)
+        # (What a playing recording's stretch held is played out above; the
+        # pace is measured anew, as the pacer finds it out anew.)
+        self._playback_sound.reset()
         self._join_chain = None
         self._demod_running = False
         self._tone_squelch.reset()
         self._tone_blocked = False
         self._iq_conditioner.reset()
-        self._clip_s = 0.0
+        self._clip_warning.reset()
         self._show_stereo(None, False)
 
     def _demodulate(
@@ -10583,7 +11187,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._device is not None and not self._demo_mode:
             self._release_device()
         if self._device is None:
-            self._device = MockDevice()
+            self._device = MockDevice(shared_sky=True)  # (R8-04: one sky)
             # The rate asked for without a device (--sample-rate), else the
             # one the demo device had last time.
             rate = self._preferred_rate or self._device_controls.remembered_rate("demo")
@@ -10776,6 +11380,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             options = dialog.options()
             if options is None:
                 return None
+        if purpose == "decode":
+            # The center the file's name gives, as Import Options offers it
+            # for Open Recording: a frequency to decode at (R7W-06).
+            options = options.with_name_center()
         return options
 
     def _confirm_stop_recordings(self, name: str) -> bool:
@@ -10988,10 +11596,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         unknown = "unknown (not stored in the file)"
         rate = options.sample_rate
         center = options.center_hz
+        # (Written as Recording Info writes it: "240 kS/s", not "0.24 MS/s".)
+        rate_text = format_file_rate(rate) if rate else unknown
+        if options.real_signal and rate:
+            rate_text = options.rate_text  # (its I/Q's, half its own: as Info)
+        center_text = format_frequency(center) if center else unknown
+        # An audio file's own frequencies are its sound's: no receiver was
+        # tuned to their middle, so there is nowhere to tune (ui-3).
+        placed = bool(center) and not (options.audio and options.own_frequencies)
+        if center and not placed:
+            center_text += (
+                " (the middle of its own frequencies, 0 Hz to "
+                f"{format_frequency(2.0 * center)})"
+            )
         lines = [
-            f"Sample format: {options.sample_format.value}",
-            f"Sample rate: {format_rate(rate) if rate else unknown}",
-            f"Center frequency: {format_frequency(center) if center else unknown}",
+            f"Sample format: {options.format_label}",
+            f"Sample rate: {rate_text}",
+            f"Center frequency: {center_text}",
         ]
         if rate:
             lines.append(f"Length: {loaded.samples / rate:.1f} s")
@@ -11022,7 +11643,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "center frequency it doesn't say)"
             )
         tune_btn = None
-        if center:
+        if placed:
             tune_btn = box.addButton("&Tune There", QMessageBox.ButtonRole.ActionRole)
             tune_btn.setToolTip(
                 f"Tune the receiver to {format_frequency(center)}, where the "
@@ -11085,7 +11706,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         background thread, much faster than real time, with progress and
         Cancel. Each message goes to the Decoder tab as it is found, noted
         with the file and where in it."""
-        from ..dsp.live_decoders import LIVE_DECODERS
+        from ..dsp.live_decoders import LIVE_DECODERS, audio_input
 
         protocols = list(LIVE_DECODERS)
         path = path or self._choose_recording("Decode Recording")
@@ -11114,6 +11735,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         protocol, offset = choice
         self._show_panel("decoder")
+        # Known by its path, not its file name alone: two recordings named
+        # alike keep lists of their own (files-1).
+        name = self._decoded_name(options.path)
+        # (Decoded again: its aircraft or text are listed anew.)
+        self._decoder_panel.recording_decode_started(name, protocol)
         counts = {"messages": 0}
         # When the recording was made (SigMF's core:datetime), to stamp its
         # messages with their own time rather than the decode's.
@@ -11125,24 +11751,30 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except ValueError:
             pass
 
+        # An audio recording's sound, decoded as a receiver's audio: no
+        # frequency of its own, and the file's own rate.
+        as_audio = options.decodes_as_audio(protocol)
+
         def show(batch: Any) -> None:
             for msg, at in batch:
                 counts["messages"] += 1
                 # The file's frequency and rate (not the receiver's); 0 when
                 # the file doesn't say where it was made.
+                freq = options.center_hz + offset if options.center_hz else 0.0
                 self._push_decoded_message(
                     msg,
-                    note=f"from {options.name} at {at:.1f} s",
-                    freq_hz=options.center_hz + offset if options.center_hz else 0.0,
-                    sample_rate=options.sample_rate,
-                    source=options.name,
+                    note=f"from {name} at {at:.1f} s",
+                    freq_hz=0.0 if as_audio else freq,
+                    sample_rate=options.frame_rate if as_audio else options.sample_rate,
+                    source=name,
                     when=start + timedelta(seconds=at) if start else None,
+                    at_s=at,
                 )
 
         result = run_job(
             self,
             "Decode Recording",
-            f"Decoding {protocol} in {options.name}…",
+            f"Decoding {protocol} in {name}…",
             lambda report, partial: decode_recording(
                 options, protocol, offset, report, partial
             ),
@@ -11153,41 +11785,93 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if options.center_hz
             else ""
         )
+        if as_audio:
+            where = ", read as a receiver's audio"
         if result.error is not None:
             logger.warning(f"Decoding {path} failed: {result.error}")
             QMessageBox.warning(
                 self,
                 "Decode Failed",
-                f"Could not decode {protocol} in {options.name}:\n{result.error}",
+                f"Could not decode {protocol} in {name}:\n{result.error}",
             )
             return False
         if result.cancelled:
             self._show_status_message(
                 f"Decoding stopped: {counts['messages']} message(s) from "
-                f"{options.name} so far.",
+                f"{name} so far.",
                 None,
                 6000,
             )
             return False
         decoded = result.value
+        # ADS-B in a very busy sky below 2.5 MS/s: replies left unread (M-D2).
+        skipped = int(getattr(decoded, "skipped", 0) or 0)
+        unread = (
+            f" {skipped:,} replies weren't read: too many at once for "
+            f"{format_rate(options.sample_rate)} (the clearest were read first)."
+            if skipped
+            else ""
+        )
         if decoded.valid:
             failed = (
                 f" ({decoded.failed} failed their checks)" if decoded.failed else ""
             )
             self._show_status_message(
                 f"Decoded {decoded.valid} {protocol} message(s) from "
-                f"{options.name}{where}{failed}.",
+                f"{name}{where}{failed}.{unread}",
                 "success",
                 8000,
             )
+        elif as_audio:
+            if audio_input(protocol) == "AM":
+                holds = "a receiver's AM audio"
+            elif protocol in ("POCSAG", "FLEX"):
+                holds = (
+                    "a receiver's FM discriminator audio (its speaker's, "
+                    "de-emphasised and cut below 300 Hz, holds no pages)"
+                )
+            else:
+                holds = "a receiver's FM audio"
+            self._show_status_message(
+                f"No {protocol} messages in {name}{where}. Check the "
+                f"protocol, and that it holds {holds}.",
+                "warning",
+                10000,
+            )
         else:
             self._show_status_message(
-                f"No {protocol} messages in {options.name}{where}. Check the "
-                "protocol and the frequency (the signal must be in the file).",
+                f"No {protocol} messages in {name}{where}. Check the "
+                "protocol and the frequency (the signal must be in the file)."
+                f"{unread}",
                 "warning",
                 10000,
             )
         return True
+
+    def _decoded_name(self, path: str) -> str:
+        """The name File > Decode Recording lists ``path``'s messages under
+        (in the Aircraft and Text views, the Messages table and Export):
+        its file name, or, when another file of that name was decoded
+        before, as many of its folders as tell it apart
+        ("tuesday/capture.wav"; its whole path if none do). A file keeps
+        its name, by any path to it: decoded again, its lists start over."""
+        names = self._own("_decoded_names")
+        if names is None:
+            names = self._decoded_names = {}
+        key = os.path.normcase(os.path.realpath(path))
+        name = names.get(key)
+        if name is None:
+            taken = set(names.values())
+            full = os.path.normpath(os.path.abspath(path))
+            parts = [part for part in full.split(os.sep) if part]
+            endings = ["/".join(parts[-depth:]) for depth in range(1, len(parts) + 1)]
+            name = next((n for n in endings + [full] if n not in taken), None)
+            count = 2
+            while name is None or name in taken:  # (a path named like one)
+                name = f"{full} ({count})"
+                count += 1
+            names[key] = name
+        return str(name)
 
     # Formats File > Save Recording writes:
     # (file dialog filter, extension, FileFormat name, SampleFormat name)
@@ -11830,14 +12514,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if width:
             self._set_demod_mode(demod, deviation or None, width)
         if demod == "FM":
-            dcs = None if tone else bookmark_dcs(bookmark)
+            # (Its own tone squelch, reversed or not: CHIRP's TSQL-R, DTCS-R.)
+            tone, dcs, reverse = bookmark_squelch(bookmark)
             if dcs is not None:
                 self._control_panel.set_dcs_squelch(*dcs)
             else:
                 self._control_panel.set_tone_squelch_hz(tone)
+            self._quiet_reverse = True  # (its own message says it)
+            try:
+                self._control_panel.set_tone_reverse(reverse)
+            finally:
+                self._quiet_reverse = False
             if tone or dcs is not None:
                 label = str(bookmark.get("label") or format_frequency(freq))
                 squelch = dcs_label(*dcs) if dcs else f"tone squelch {tone:.1f} Hz"
+                if reverse:
+                    squelch = f"reverse {squelch}"
                 text = f"Tuned to {label} (FM, {squelch})"
                 # (It replaces the tune's own "Tuned to ...": led as that
                 # was, by a decoder's "off" note, P-07.)
@@ -12384,14 +13076,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuned = abs(freq - self._current_frequency()) < 0.5
         tone = self._control_panel.tone_squelch_hz() if mode == "FM" and tuned else 0.0
         dcs = self._control_panel.dcs_squelch() if mode == "FM" and tuned else None
+        reverse = self._control_panel.tone_reverse()
         if tone:
-            panel.set_tone(index, tone)
+            panel.set_tone(index, tone, reverse=reverse)
         elif dcs is not None:
-            panel.set_dcs(index, *dcs)
+            panel.set_dcs(index, *dcs, reverse=reverse)
         # (The tone squelch saved with it is said, as tuning a bookmark does.)
         tone_text = f", tone squelch {tone:.1f} Hz" if tone else ""
         if dcs is not None:
             tone_text = f", {dcs_label(*dcs)}"
+        if tone_text and reverse:
+            tone_text = f", reverse {tone_text[2:]}"
         self._show_status_message(
             f"Bookmarked {label} ({self._mode_text(mode)}{tone_text}). Rename it "
             "with F2 in the Bookmarks tab.",
@@ -12498,10 +13193,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         ``"silent"`` (on, but None (I/Q) mode has no audio), ``"second"``
         (on, but Listen in the Second Receiver window plays only that
         receiver) or ``"paused"`` (on, but the signal received isn't real
-        time: the receiver can't keep up, or a recording plays faster or
-        slower). Paused is what holds the audio now, as _route_audio judges
-        it: not after Stop, nor once the signal is real time again while
-        the squelch is closed."""
+        time: the receiver can't keep up, or a recording plays below half
+        of real time, at 0.5x below a quarter; at any speed the computer
+        keeps up with it plays, M-P1). Paused is what holds the audio now,
+        as _route_audio judges it: not after Stop, nor once the signal is
+        real time again while the squelch is closed."""
         if not self._audio.available:
             return "no_output"
         if not self._audio_enabled:
@@ -13410,7 +14106,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Frequency Centered the LO always follows (every tune retunes the
         device). While the LO is locked (:meth:`_lock_lo`, a recording
         playing back) frequencies outside its span are refused, and those
-        inside it are tuned even above the receiver's range.
+        inside it are tuned even above the receiver's range (or below it,
+        down to just above 0 Hz in a one-channel file).
 
         A frequency outside the connected device's range, or one the device
         rejects, is refused: the status bar says why ("RTL-SDR tunes

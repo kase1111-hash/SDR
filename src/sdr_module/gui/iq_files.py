@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..dsp import real_iq
 from ..dsp.recording import (
     FileFormat,
     IQPlayer,
@@ -36,6 +37,7 @@ from ..dsp.recording import (
     guess_sample_format,
     sigmf_format,
 )
+from ..dsp.wav_file import read_wav_header
 from .file_dialogs import display_path
 
 try:
@@ -98,6 +100,10 @@ OPEN_FILTERS = ";;".join(
     )
 )
 
+#: Where in 32-bit words a WAV file's 24-bit samples lie, by its
+#: ``wav_sample_justified`` (see dsp.wav_file.WavHeader.justified).
+_WORD_PLACES: Dict[str, str] = {"left": "top", "right": "low"}
+
 #: How Recording Info names a WAV file that isn't a classic one (its
 #: ``wav_container``): RF64 holds more than 4 GiB.
 WAV_CONTAINER_NAMES: Dict[str, str] = {
@@ -148,6 +154,9 @@ _MAX_CENTER_HZ = 6e9  # (a bare number in a file name: what receivers tune)
 #: through a downconverter lies above the receiver's range (a 10 GHz
 #: downlink), and plays there too.
 PLAYBACK_RANGE = (_MIN_CENTER_HZ, 300e9)
+#: The sample rates a recording can have (typed in Import Options: a file's
+#: own rate, a one-channel file's too).
+RATE_RANGE = (1e3, 200e6)
 
 
 @dataclass
@@ -242,8 +251,8 @@ def guess_from_filename(name: str) -> FileNameHints:
 def parse_rate_text(text: str) -> Optional[float]:
     """A sample rate typed as ``2.4``, ``2.4M``, ``2.4 MS/s``, ``2048000``,
     ``250k`` or ``250 kS/s``, in samples per second (None if it can't be
-    read, or isn't between 1 kS/s and 200 MS/s). A bare number up to 100
-    is in MS/s, up to 1000 in kS/s, above that in S/s."""
+    read, or isn't between 1 kS/s and 200 MS/s: :data:`RATE_RANGE`). A bare
+    number up to 100 is in MS/s, up to 1000 in kS/s, above that in S/s."""
     compact = re.sub(r"\s+", "", str(text or "")).lower().replace(",", ".")
     match = re.fullmatch(
         r"(\d+(?:\.\d*)?|\.\d+)([kmg]?)(?:s/s|sps|sa/s|samples/s|hz)?", compact
@@ -260,7 +269,7 @@ def parse_rate_text(text: str) -> Optional[float]:
         rate = value * 1e3
     else:
         rate = value
-    return rate if 1e3 <= rate <= 200e6 else None
+    return rate if RATE_RANGE[0] <= rate <= RATE_RANGE[1] else None
 
 
 def format_rate(rate_hz: float) -> str:
@@ -276,6 +285,35 @@ def format_mhz(freq_hz: float) -> str:
     text = f"{max(0.0, float(freq_hz)) / 1e6:.6f}".rstrip("0")
     whole, _, frac = text.partition(".")
     return f"{whole}.{frac.ljust(3, '0')} MHz"
+
+
+#: Up to this rate (Hz) a one-channel file is probably audio (an IF or RF
+#: sampled directly is faster), unless its metadata places it elsewhere
+#: (IqFileOptions.audio): the Decode dialog then says what decodes.
+AUDIO_RATE_MAX = real_iq.AUDIO_RATE_MAX
+
+
+def _real_signal_text(iq_rate_hz: float, center_hz: float) -> str:
+    """What Recording Info says of a one-channel WAV file read as I/Q at
+    ``iq_rate_hz`` (half its own rate), centered on ``center_hz``: its own
+    frequencies, unless its metadata places it elsewhere (an IF at its
+    RF)."""
+    top = float(iq_rate_hz)
+    text = (
+        "One: a real signal (audio, or an IF or RF sampled directly), played "
+        "as I/Q at half its rate"
+    )
+    if not top > 0:
+        return text  # (its rate unknown: so are its frequencies)
+    if abs(float(center_hz) - top / 2.0) > 0.5:
+        return (
+            f"{text}, each frequency once (not mirrored), where its metadata places it"
+        )
+    band = f"{top / 1e6:g} MHz" if top >= 1e6 else f"{top / 1e3:g} kHz"
+    return (
+        f"{text}, so the spectrum shows its own frequencies, 0 Hz to {band}, "
+        "once each (not mirrored)"
+    )
 
 
 def format_duration(seconds: float) -> str:
@@ -339,10 +377,89 @@ class IqFileOptions:
     #: Where it resumed after a gap in time: (first sample, UTC start) of
     #: each SigMF capture after the first.
     segments: Tuple[Tuple[int, str], ...] = ()
+    #: How a WAV file stores its samples, in words ("24-bit integer",
+    #: "32-bit float"); "" for other files (their sample format says it).
+    wav_format: str = ""
+    #: A WAV file's channels: 2 (I and Q), or 1: a real signal, read as
+    #: I/Q at half its rate, centred on a quarter of it (dsp.real_iq), so
+    #: ``sample_rate``, ``center_hz`` and ``total_samples`` are the I/Q's.
+    channels: int = 2
+    #: ``center_hz`` is the one the file's name gives (SDR# and HDSDR put
+    #: it there), not its metadata's or the user's: see with_name_center.
+    center_named: bool = False
+    #: ``sample_rate`` is worked out from the one the file's name gives
+    #: (``_48ksps``), not its metadata's or the user's: see with_name_rate.
+    rate_named: bool = False
 
     @property
     def name(self) -> str:
         return os.path.basename(self.path)
+
+    @property
+    def real_signal(self) -> bool:
+        """One channel: a real signal (audio, or an IF or RF sampled
+        directly), read as I/Q."""
+        return self.channels == 1
+
+    @property
+    def audio(self) -> bool:
+        """A one-channel file at a sound card's rate (up to
+        :data:`AUDIO_RATE_MAX`) at its own frequencies: audio, probably,
+        rather than an IF or RF sampled directly. One its metadata places
+        elsewhere (an IF at 10.7 MHz) is that IF, played, converted and
+        decoded there (dsp.real_iq.is_audio, the one rule)."""
+        return self.real_signal and real_iq.is_audio(self.frame_rate, self.center_hz)
+
+    @property
+    def frame_rate(self) -> float:
+        """The file's own sample rate: a one-channel file's is twice the
+        I/Q's (:attr:`sample_rate`)."""
+        return 2.0 * self.sample_rate if self.real_signal else self.sample_rate
+
+    @property
+    def rate_text(self) -> str:
+        """Its sample rate in words: "2.4 MS/s"; a one-channel file's says
+        it is its I/Q's, "24 kS/s as I/Q (48 kS/s in the file)" ("" when
+        unknown)."""
+        if not self.sample_rate:
+            return ""
+        text = format_rate(self.sample_rate)
+        if self.real_signal:
+            text += f" as I/Q ({format_rate(self.frame_rate)} in the file)"
+        return text
+
+    @property
+    def own_frequencies(self) -> bool:
+        """A one-channel file read at its own frequencies (0 Hz to half its
+        rate, centered on a quarter of it), not placed elsewhere by its
+        metadata (an IF at its RF): for audio, its sound's frequencies,
+        where no receiver was tuned."""
+        return (
+            self.real_signal
+            and self.sample_rate > 0
+            and abs(self.center_hz - self.sample_rate / 2.0) <= 0.5
+        )
+
+    def decodes_as_audio(self, protocol: str) -> bool:
+        """Whether File > Decode Recording reads this file as a receiver's
+        audio for ``protocol``: audio (:attr:`audio`) and a protocol sent
+        as a receiver's audio (APRS, POCSAG and FLEX after its FM
+        discriminator, ACARS after its AM detector). Its own samples then
+        go to the decoder at :attr:`frame_rate`; Morse tones decode from
+        the I/Q at their pitch."""
+        from ..dsp.live_decoders import audio_input
+
+        return self.audio and bool(audio_input(protocol))
+
+    @property
+    def format_label(self) -> str:
+        """How the samples are stored, as the window names it: ``"cu8"``,
+        or a WAV file's own format, ``"24-bit integer WAV"``, ``"16-bit
+        integer WAV, one channel"``."""
+        if not self.wav_format:
+            return self.sample_format.value
+        text = f"{self.wav_format} WAV"
+        return text + ", one channel" if self.real_signal else text
 
     @property
     def duration_s(self) -> float:
@@ -352,6 +469,49 @@ class IqFileOptions:
     def headerless(self) -> bool:
         """A raw file whose format nothing but its name suggests."""
         return self.file_format is FileFormat.RAW and not self.source
+
+    def with_name_center(self) -> "IqFileOptions":
+        """These options with the center frequency the file's name gives
+        when nothing else gives one (:attr:`center_named`): what Import
+        Options offers Open Recording, for Decode Recording and Recording
+        Info, which don't ask for it. Unchanged for a one-channel file (its
+        frequencies are its own), a name that gives none or one no
+        recording is centered on (:data:`PLAYBACK_RANGE`, as Import Options
+        takes it: a test tone's "440Hz"), or options the user confirmed (a
+        center cleared in Import Options stays unknown)."""
+        if self.center_hz or self.real_signal or self.confirmed:
+            return self
+        named = guess_from_filename(self.path).center_hz
+        low, high = PLAYBACK_RANGE
+        if not named or not low <= named <= high:
+            return self
+        return replace(self, center_hz=float(named), center_named=True)
+
+    def with_name_rate(self) -> "IqFileOptions":
+        """These options with the sample rate the file's name gives when
+        nothing else gives one (:attr:`rate_named`): what Import Options
+        offers Open Recording, for Recording Info, which doesn't ask for
+        it. A one-channel file's name gives its own rate: its I/Q's is half
+        of it, and unless its metadata places it, its center a quarter (its
+        own frequencies). Unchanged for a name that gives none or one no
+        recording has (:data:`RATE_RANGE`, as Import Options takes it), or
+        options the user confirmed (a rate cleared in Import Options stays
+        unknown)."""
+        if self.sample_rate or self.confirmed:
+            return self
+        named = guess_from_filename(self.path).sample_rate
+        low, high = RATE_RANGE
+        if not named or not low <= named <= high:
+            return self
+        if not self.real_signal:
+            return replace(self, sample_rate=float(named), rate_named=True)
+        center = self.center_hz or real_iq.iq_center(named)
+        return replace(
+            self,
+            sample_rate=real_iq.iq_rate(named),
+            center_hz=center,
+            rate_named=True,
+        )
 
     def open_player(self) -> IQPlayer:
         """An :class:`IQPlayer` reading the file with these settings."""
@@ -393,18 +553,6 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     ):
         stem = split_name(path)[0]
         raise ValueError(f"its samples are missing: {stem}.sigmf-data isn't next to it")
-    if info.file_format is FileFormat.WAV and meta.get("wav_channels") == 1:
-        raise ValueError(
-            "it has one channel: it is audio, not I/Q (an I/Q WAV file has two, "
-            "I and Q)"
-        )
-    width = meta.get("wav_sample_width")
-    if info.file_format is FileFormat.WAV and width not in (None, 1, 2):
-        # (The reader takes them for 16-bit: they would play as noise.)
-        raise ValueError(
-            f"its samples are {8 * int(width)}-bit, and this app reads 8- and "
-            "16-bit I/Q WAV files"
-        )
     datatype = str(meta.get("sigmf_datatype", "") or "")
     if datatype and sigmf_format(datatype) is None:
         raise ValueError(
@@ -434,6 +582,9 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
         description=str(meta.get("sigmf_description", "") or ""),
         segments=tuple(meta.get("sigmf_segments") or ()),
     )
+    if info.file_format is FileFormat.WAV:
+        options.wav_format = _wav_format(meta)
+        options.channels = 1 if meta.get("wav_channels") == 1 else 2
     missing: Set[str] = set()
     if options.headerless:
         missing.add("format")
@@ -449,6 +600,21 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     if not options.center_hz:
         missing.add("center")
     return options, missing
+
+
+def _wav_format(meta: Dict[str, Any]) -> str:
+    """A WAV file's samples in words, from what FormatDetector found
+    ("24-bit integer", also in 32-bit words; "32-bit float")."""
+    try:
+        bits = int(meta.get("wav_sample_bits") or 0) or 8 * int(
+            meta.get("wav_sample_width") or 0
+        )
+    except (TypeError, ValueError):
+        return ""
+    if bits <= 0:
+        return ""
+    kind = "float" if meta.get("wav_sample_type") == "float" else "integer"
+    return f"{bits}-bit {kind}"
 
 
 def _known(value: Any) -> float:
@@ -552,6 +718,14 @@ if HAS_PYQT6:
             )
             self._result: Optional[IqFileOptions] = None
             self._refit = False
+            # A one-channel file's own samples (its I/Q's are half as many):
+            # counted at the rate asked, which is its own too.
+            self._own_samples: Optional[int] = None
+            if options.real_signal:
+                try:
+                    self._own_samples = read_wav_header(options.path).frames
+                except (OSError, ValueError):
+                    pass  # (its I/Q's are counted then)
             self.setWindowTitle(f"Import Options – {options.name}")
             self.setMinimumWidth(500)
             self._build(guesses or {})
@@ -562,6 +736,12 @@ if HAS_PYQT6:
         def _build(self, guesses: Dict[str, float]) -> None:
             options = self._options
             hints = guess_from_filename(options.path)
+            # A one-channel file (a real signal): the rate asked is its own,
+            # its samples' (its I/Q's is half of it), and unless its metadata
+            # places it, its frequencies are its own (0 Hz to half its rate):
+            # centered on a quarter of that rate, not asked (files-2).
+            real = options.real_signal
+            self._center_follows_rate = real and not options.center_hz
             layout = QVBoxLayout(self)
             layout.setSpacing(10)
 
@@ -593,6 +773,11 @@ if HAS_PYQT6:
             index = self._format_combo.findData(options.sample_format)
             self._format_combo.setCurrentIndex(max(0, index))
             editable_format = "format" in self._missing
+            if not editable_format and options.wav_format:
+                # (As the WAV file states it: "24-bit integer WAV", not the
+                # cf32 it is read as.)
+                self._format_combo.clear()
+                self._format_combo.addItem(options.format_label, options.sample_format)
             self._format_combo.setEnabled(editable_format)
             self._format_combo.setToolTip(
                 "How each I and Q value is stored. rtl_sdr writes cu8, "
@@ -618,12 +803,19 @@ if HAS_PYQT6:
             self._rate_edit = QLineEdit()
             self._rate_edit.setAccessibleName("Sample rate")
             self._rate_edit.setToolTip(
-                "Samples per second: 2.4 or 2.4M (MS/s), 2048000, 250k."
+                "The file's own samples per second: one channel plays as I/Q at "
+                "half of it. 48k, 44.1k, 2.4M (MS/s)."
+                if real
+                else "Samples per second: 2.4 or 2.4M (MS/s), 2048000, 250k."
             )
             self._rate_hint = QLabel()
             set_role(self._rate_hint, "hint")
+            # (The receiver's rate is no guess for a one-channel file.)
             rate, rate_note = self._prefill(
-                "rate", options.sample_rate, hints.sample_rate, guesses.get("rate")
+                "rate",
+                options.frame_rate,
+                hints.sample_rate,
+                None if real else guesses.get("rate"),
             )
             if rate:
                 self._rate_edit.setText(format_rate(rate))
@@ -639,14 +831,21 @@ if HAS_PYQT6:
             self._center_edit = QLineEdit()
             self._center_edit.setAccessibleName("Center frequency")
             self._center_edit.setToolTip(
-                "Where the receiver was tuned (the middle of the recording), "
+                "A one-channel file shows its own frequencies, 0 Hz to half its "
+                "rate: centered on a quarter of its rate."
+                if self._center_follows_rate
+                else "Where the receiver was tuned (the middle of the recording), "
                 "in MHz unless you type a unit: 433.92, 7074k, 1.09G."
             )
             self._center_hint = QLabel()
             set_role(self._center_hint, "hint")
-            center, center_note = self._prefill(
-                "center", options.center_hz, hints.center_hz, guesses.get("center")
-            )
+            if self._center_follows_rate:
+                # (Filled in from the rate as it is typed: _update_check.)
+                center, center_note = 0.0, "the middle of its own frequencies"
+            else:
+                center, center_note = self._prefill(
+                    "center", options.center_hz, hints.center_hz, guesses.get("center")
+                )
             if center:
                 self._center_edit.setText(format_mhz(center))
             self._center_note = center_note
@@ -654,7 +853,9 @@ if HAS_PYQT6:
             self._center_edit.setPlaceholderText(
                 "Required" if "center" in self._required else "Unknown"
             )
-            self._center_edit.setEnabled("center" in self._missing)
+            self._center_edit.setEnabled(
+                "center" in self._missing and not self._center_follows_rate
+            )
             self._center_edit.textChanged.connect(self._update_check)
             form.addRow(
                 "&Center frequency:", self._row(self._center_edit, self._center_hint)
@@ -738,6 +939,8 @@ if HAS_PYQT6:
                     "Can't read the sample rate: type it in MS/s (2.4), with a "
                     "unit (250k, 2.048M) or in samples per second (2048000)."
                 )
+            if self._center_follows_rate:
+                center = real_iq.iq_center(rate)  # (its own frequencies)
             if center is None:
                 return None, (
                     "Can't read the center frequency: type it in MHz (433.92) "
@@ -750,6 +953,8 @@ if HAS_PYQT6:
                     verb = _ACTION_TEXT.get(self._purpose, "&OK").replace("&", "")
                     return None, f"Enter the {what} to {verb.lower()} the file."
             fmt = self.sample_format()
+            if self._options.real_signal:
+                rate = real_iq.iq_rate(rate)  # (its I/Q's: half its own)
             options = replace(
                 self._options,
                 sample_format=fmt,
@@ -769,6 +974,13 @@ if HAS_PYQT6:
                 )
 
         def _update_check(self, *_args: Any) -> None:
+            if self._center_follows_rate:
+                rate = self.sample_rate()
+                text = format_mhz(real_iq.iq_center(rate)) if rate else ""
+                if self._center_edit.text() != text:
+                    blocked = self._center_edit.blockSignals(True)
+                    self._center_edit.setText(text)
+                    self._center_edit.blockSignals(blocked)
             fmt = self.sample_format()
             guess = self._content
             hint = guess is not None and guess != fmt and self._format_combo.isEnabled()
@@ -801,6 +1013,8 @@ if HAS_PYQT6:
                 return
             assert options is not None
             count = options.total_samples
+            if self._own_samples is not None:
+                count = self._own_samples  # (at its own rate, as asked)
             text = f"{count:,} samples"
             if options.sample_rate:
                 text += f", {format_duration(options.duration_s)} long"
@@ -970,11 +1184,43 @@ if HAS_PYQT6:
             }
             kind = kinds.get(info["file_format"], info["file_format"])
             container = (info.get("metadata") or {}).get("wav_container")
-            if info["file_format"] == "wav" and container in WAV_CONTAINER_NAMES:
-                kind = f"WAV file ({WAV_CONTAINER_NAMES[container]}), I/Q as stereo"
+            if info["file_format"] == "wav":
+                held = (
+                    "one channel (a real signal)"
+                    if options.real_signal
+                    else "I/Q as stereo"
+                )
+                named = WAV_CONTAINER_NAMES.get(container)
+                kind = f"WAV file ({named}), {held}" if named else f"WAV file, {held}"
             fmt = options.sample_format
             rate = float(info["sample_rate_hz"] or 0.0)
             center = float(info["center_frequency_hz"] or 0.0)
+            seconds = float(info["duration_seconds"] or 0.0)
+            # The rate and center the file's name gives, when nothing else
+            # does: as Import Options offers them for Open Recording.
+            rate_named = False
+            if not rate:
+                named = options.with_name_rate()
+                if named.rate_named:
+                    rate, rate_named = named.sample_rate, True
+                    seconds = int(info["num_samples"]) / rate
+                    if options.real_signal and not center:
+                        center = named.center_hz  # (its own frequencies)
+            center_text = format_mhz(center) if center else unknown
+            if not center:
+                named = options.with_name_center()
+                if named.center_named:
+                    center = named.center_hz
+                    center_text = f"{format_mhz(center)} (from the file name)"
+            rate_text = format_rate(rate) if rate else unknown
+            named_note = ", from the file name" if rate_named else ""
+            if options.real_signal and rate:
+                rate_text = (
+                    f"{rate_text} as I/Q ({format_rate(2 * rate)} in the "
+                    f"file{named_note})"
+                )
+            elif rate_named:
+                rate_text += " (from the file name)"
             rows = [
                 ("File", options.name),
                 (
@@ -982,9 +1228,20 @@ if HAS_PYQT6:
                     display_path(os.path.dirname(os.path.abspath(options.path))),
                 ),
                 ("Type", kind),
-                ("Sample format", FORMAT_NAMES.get(fmt, fmt.value)),
-                ("Sample rate", format_rate(rate) if rate else unknown),
-                ("Center frequency", format_mhz(center) if center else unknown),
+            ]
+            if options.real_signal:
+                rows.append(("Channels", _real_signal_text(rate, center)))
+            stored = options.wav_format or FORMAT_NAMES.get(fmt, fmt.value)
+            where = _WORD_PLACES.get(
+                str((info.get("metadata") or {}).get("wav_sample_justified") or "")
+            )
+            if where:
+                # (Its header doesn't say where: as its data shows them.)
+                stored += f", in the {where} three bytes of 32-bit words"
+            rows += [
+                ("Sample format", stored),
+                ("Sample rate", rate_text),
+                ("Center frequency", center_text),
             ]
             if rate and center:
                 rows.append(
@@ -998,7 +1255,7 @@ if HAS_PYQT6:
                 (
                     "Duration",
                     (
-                        format_duration(info["duration_seconds"])
+                        format_duration(seconds)
                         if rate
                         else "Unknown (needs the sample rate)"
                     ),
@@ -1100,8 +1357,14 @@ if HAS_PYQT6:
                 span = (
                     f"The recording covers "
                     f"{format_mhz(options.center_hz - half).split(' ')[0]}–"
-                    f"{format_mhz(options.center_hz + half)}."
+                    f"{format_mhz(options.center_hz + half)}"
                 )
+                if options.center_named:
+                    span += (
+                        f" (centered on {format_mhz(options.center_hz)}, from "
+                        "the file name)"
+                    )
+                span += "."
             else:
                 self._freq.setAccessibleName("Offset from the center")
                 self._freq.setToolTip(
@@ -1115,6 +1378,15 @@ if HAS_PYQT6:
                     f"from its middle (within ±{options.sample_rate / 2e3:g} kHz)."
                 )
             layout.addLayout(form)
+            if options.audio:
+                # (Audio, probably: how each protocol decodes in it.)
+                span += (
+                    " It has one channel (a real signal): AX.25/APRS, POCSAG, "
+                    "FLEX and ACARS decode its sound as a receiver's audio "
+                    "(pager audio as the FM discriminator gives it, not a "
+                    "speaker's), and Morse tones decode with CW (Morse) at "
+                    "their pitch."
+                )
             self._span_text = span
             self._note = QLabel(span)
             self._note.setWordWrap(True)
@@ -1126,6 +1398,9 @@ if HAS_PYQT6:
             if self._has_center:
                 self._freq.textEdited.connect(self._on_freq_typed)
                 self._protocol.currentTextChanged.connect(self._on_protocol_changed)
+            self._freq_tip = self._freq.toolTip()
+            self._protocol.currentTextChanged.connect(self._sync_as_audio)
+            self._sync_as_audio(self._protocol.currentText())
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
             ok = QPushButton("&Decode")
             set_role(ok, "primary")
@@ -1141,7 +1416,10 @@ if HAS_PYQT6:
             text = self._freq.text().strip()
             half = 0.5 * self._options.sample_rate
             if self._has_center:
-                parsed = parse_frequency_text(text, 1e6, *PLAYBACK_RANGE)
+                # (A real signal's frequencies start at 0 Hz: a Morse tone
+                # at 700 Hz.)
+                low = 0.0 if self._options.real_signal else PLAYBACK_RANGE[0]
+                parsed = parse_frequency_text(text, 1e6, low, PLAYBACK_RANGE[1])
                 if parsed.state != ACCEPTABLE or parsed.hz is None:
                     return None
                 offset = parsed.hz - self._options.center_hz
@@ -1161,13 +1439,24 @@ if HAS_PYQT6:
             model = self._protocol.model()
             for index, name in enumerate(protocols):
                 cls = live_decoder_class(name)
-                low = float(getattr(cls, "MIN_SAMPLE_RATE", 0.0) or 0.0)
-                if not 0 < rate < low:
-                    continue
-                why = (
-                    f"{name} needs at least {format_rate(low)}; this recording "
-                    f"is {format_rate(rate)}"
-                )
+                if self._options.decodes_as_audio(name):
+                    # (Its sound, at the file's own rate.)
+                    low = float(getattr(cls, "MIN_AUDIO_RATE", 0.0) or 0.0)
+                    have = self._options.frame_rate
+                    if not 0 < have < low:
+                        continue
+                    why = (
+                        f"{name} needs audio at {format_rate(low)} or more; this "
+                        f"recording is {format_rate(have)}"
+                    )
+                else:
+                    low = float(getattr(cls, "MIN_SAMPLE_RATE", 0.0) or 0.0)
+                    if not 0 < rate < low:
+                        continue
+                    why = (
+                        f"{name} needs at least {format_rate(low)}; this recording "
+                        f"is {format_rate(rate)}"
+                    )
                 marked[name] = why
                 item = model.item(index) if hasattr(model, "item") else None
                 if item is not None:
@@ -1175,11 +1464,29 @@ if HAS_PYQT6:
                 self._protocol.setItemData(index, why, Qt.ItemDataRole.ToolTipRole)
             return marked
 
+        def _sync_as_audio(self, protocol: str) -> None:
+            """A protocol decoded from the file's sound (an audio
+            recording's, as a receiver's audio) has no frequency to ask."""
+            audio = self._options.decodes_as_audio(protocol)
+            self._freq.setEnabled(not audio)
+            self._freq.setToolTip(
+                f"{protocol} decodes this file's sound as a receiver's audio: "
+                "there is no frequency to choose."
+                if audio
+                else self._freq_tip
+            )
+
         def _on_accept(self) -> None:
-            why = self._too_slow.get(self._protocol.currentText())
+            protocol = self._protocol.currentText()
+            why = self._too_slow.get(protocol)
             if why:  # (every protocol is: nothing to choose instead)
                 self._note.setText(f"{why}.")
                 set_tone(self._note, "danger")
+                return
+            if self._options.decodes_as_audio(protocol):
+                # (Its sound, whatever the Frequency box holds.)
+                self._result = (protocol, 0.0)
+                self.accept()
                 return
             offset = self.offset()
             if offset is None:

@@ -19,7 +19,7 @@ import logging
 import math
 import os
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, QSize, Qt, pyqtSignal
@@ -69,6 +69,7 @@ from .audio_chain import (
     NOISE_REDUCTION_LEVELS,
     NOTCH_CHOICES,
     NOTCH_RANGE_HZ,
+    REVERSE_TONE_TIP,
 )
 from .device_settings import (
     ADSB_MIN_RATE,
@@ -369,6 +370,29 @@ def _parse_hz(text: str) -> float:
     value, _, unit = text.strip().partition(" ")
     scale = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}.get(unit.strip(), 1.0)
     return float(value) * scale
+
+
+def _frequencies(value: Any) -> Tuple[float, ...]:
+    """The notch's readout as frequencies: None (none), a number or a
+    sequence of them (anything else, or not finite, left out)."""
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)):
+        values: Sequence[Any] = (value,)
+    else:
+        try:
+            values = tuple(value)  # (a list, a tuple, a NumPy array...)
+        except TypeError:
+            values = (value,)  # (one number)
+    found = []
+    for item in values:
+        try:
+            hz = float(item)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(hz):
+            found.append(hz)
+    return tuple(found)
 
 
 def _elide_middle(text: str, limit: int) -> str:
@@ -906,6 +930,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         tone_squelch_changed = pyqtSignal(float)  # Hz, 0 = off
         # A DCS code chosen in the Tone squelch list ("D023N"), "" for none.
         dcs_squelch_changed = pyqtSignal(str)
+        # The tone squelch reversed (muted while the tone or code is heard).
+        tone_reverse_changed = pyqtSignal(bool)
         # The audio notch: off / auto / manual, and Manual's frequency (Hz).
         notch_changed = pyqtSignal(str, int)
         # The low cut: "off" or its corner in Hz ("100", "200", "300").
@@ -1483,6 +1509,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         self._notch_found = QLabel()
         self._notch_found.setAccessibleName("Whistle removed")
+        # (Up to three frequencies: it may wrap rather than widen the
+        # column; at the column's width it is one line.)
+        self._notch_found.setWordWrap(True)
         self._notch_stack = QStackedWidget()
         self._notch_stack.addWidget(self._notch_spin)
         self._notch_stack.addWidget(self._notch_found)
@@ -1496,6 +1525,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         row.addStretch(1)
         whistle_label = self._add_row(form, "Whistle:", notch_row)
         whistle_label.setBuddy(self._notch_spin)
+        self._notch_label = whistle_label  # ("Whistles:" for several)
         self._notch_row = notch_row
         form.setRowVisible(notch_row, False)  # (Off)
         self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
@@ -1533,6 +1563,13 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._tone_combo.setAccessibleName("Tone squelch")
         self._tone_combo.currentIndexChanged.connect(self._on_tone_changed)
         self._add_row(form, "Tone squelch:", self._tone_combo)
+
+        # (M-Q3) Reversed: muted while the tone or code is heard.
+        self._tone_reverse_check = QCheckBox("Reverse: mute this tone")
+        self._tone_reverse_check.setAccessibleName("Reverse tone squelch")
+        self._tone_reverse_check.toggled.connect(self.tone_reverse_changed.emit)
+        self._add_row(form, "", self._tone_reverse_check)
+        self._update_tone_reverse()  # (Off chosen: nothing to reverse yet)
 
         # The CTCSS tone the station sends (FM only, like the tone squelch).
         self._tone_heard = QLabel("—")
@@ -2207,14 +2244,17 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         is_fm = mode == "FM"
         self._tone_combo.setEnabled(is_fm)
         self._audio_form.setRowVisible(self._tone_heard, is_fm)
+        self._audio_form.setRowVisible(self._tone_reverse_check, is_fm)
         self._tone_combo.setToolTip(
             "Tone squelch: only play stations that send this sub-audible "
             "CTCSS tone or DCS code (repeaters, PMR); the tone or the code's "
-            "bits are filtered out of what you hear. Tone heard shows the "
-            "one on the channel."
+            "bits are filtered out of what you hear. Reverse, below, mutes "
+            "them instead and plays the rest. Tone heard shows the one on "
+            "the channel."
             if is_fm
             else "Only used in FM mode"
         )
+        self._update_tone_reverse()
         audible = not mode.startswith("None")
         self._nr_combo.setEnabled(audible)
         self._squelch_check.setEnabled(audible)
@@ -2344,6 +2384,37 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self.tone_squelch_changed.emit(self.tone_squelch_hz())
         code = self.dcs_squelch()
         self.dcs_squelch_changed.emit(format_dcs(*code) if code else "")
+        self._update_tone_reverse()
+
+    def _update_tone_reverse(self) -> None:
+        """Reverse applies to a tone or code chosen, in FM (M-Q3)."""
+        check = getattr(self, "_tone_reverse_check", None)
+        if check is None:  # (the tone list is filled before it exists)
+            return
+        fm = self._demod_combo.currentText() == "FM"
+        code = self.dcs_squelch() is not None
+        chosen = bool(self.tone_squelch_hz()) or code
+        check.setText("Reverse: mute this code" if code else "Reverse: mute this tone")
+        check.setEnabled(fm and chosen)
+        if not fm:
+            tip = "Only used in FM mode"
+        elif not chosen:
+            tip = (
+                "Choose a CTCSS tone or DCS code in Tone squelch first: Reverse "
+                "mutes the stations that send it."
+            )
+        else:
+            tip = REVERSE_TONE_TIP
+        check.setToolTip(tip)
+
+    def tone_reverse(self) -> bool:
+        """Whether the tone squelch is reversed (muted while its tone or
+        code is heard): ticked, whether or not a tone is chosen."""
+        return bool(self._tone_reverse_check.isChecked())
+
+    def set_tone_reverse(self, reverse: bool) -> None:
+        """Reverse the tone squelch, or not (CHIRP's TSQL-R and DTCS-R)."""
+        self._tone_reverse_check.setChecked(bool(reverse))
 
     def tone_squelch_hz(self) -> float:
         """The tone squelch's CTCSS tone (Hz), 0 when it is off (or a DCS
@@ -2379,7 +2450,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     ) -> None:
         """Show the sub-audible tone (or DCS code, ``(code, inverted)``)
         heard on the channel (None: none; ``checked`` False: tones aren't
-        looked for, at a broadcast FM deviation without a tone squelch)."""
+        looked for, at a broadcast FM deviation without a tone squelch).
+        One the reverse tone squelch mutes (the one chosen, Reverse ticked)
+        is shown in the warning tone, its tooltip saying so."""
         if checked and dcs is not None:
             code, inverted = dcs
             text = dcs_label(code, inverted)
@@ -2390,10 +2463,16 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             twin = dcs_same_signal(code, inverted)
             if twin is not None:
                 tip += f": the same signal as {dcs_label(*twin)}"
+            chosen = self.dcs_squelch()
+            muted = self._reverse_mutes(
+                chosen is not None and chosen in ((code, inverted), twin)
+            )
+            if muted:
+                tip += ". The reverse tone squelch mutes it."
             if self._tone_heard.text() != text or self._tone_heard.toolTip() != tip:
                 self._tone_heard.setText(text)
                 self._tone_heard.setToolTip(tip)
-                set_tone(self._tone_heard, "success")
+                set_tone(self._tone_heard, "warning" if muted else "success")
             return
         if not checked:
             text = "Not checked"
@@ -2412,11 +2491,23 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         else:
             text = ctcss_label(freq)
             tip = f"The station sends a {text} CTCSS tone"
-        if self._tone_heard.text() != text:
+        heard = checked and freq is not None
+        muted = heard and self._reverse_mutes(
+            abs(self.tone_squelch_hz() - float(freq or 0.0)) < 0.05
+        )
+        if muted:
+            tip += ". The reverse tone squelch mutes it."
+        if self._tone_heard.text() != text or self._tone_heard.toolTip() != tip:
             self._tone_heard.setText(text)
             self._tone_heard.setToolTip(tip)
-            heard = checked and freq is not None
-            set_tone(self._tone_heard, "success" if heard else "muted")
+            tone = "warning" if muted else "success" if heard else "muted"
+            set_tone(self._tone_heard, tone)
+
+    def _reverse_mutes(self, chosen_heard: bool) -> bool:
+        """Whether the tone or code heard is one the reverse tone squelch
+        mutes (``chosen_heard``: it is the one chosen)."""
+        check = getattr(self, "_tone_reverse_check", None)
+        return bool(chosen_heard and check is not None and check.isChecked())
 
     # -- the notch (K-A1) ---------------------------------------------------
 
@@ -2437,18 +2528,21 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._notch_combo.setEnabled(applies)
         self._notch_spin.setEnabled(applies and mode == "manual")
         self._notch_found.setEnabled(applies)
-        if not applies:
-            self.show_notch_found(None)  # (nothing is removed here)
+        if not applies or mode != "auto":
+            # (Nothing is removed here, or Manual's one frequency: Auto
+            # shows what it finds again within a frame.)
+            self.show_notch_found(None)
         self._notch_stack.setCurrentWidget(
             self._notch_found if mode == "auto" else self._notch_spin
         )
         self._audio_form.setRowVisible(self._notch_row, mode != "off")
         self._notch_combo.setToolTip(
             why
-            or "Removes a whistle (a heterodyne) from the audio. Auto finds the "
-            "strongest steady one and follows it as it drifts, leaving voice "
-            "alone (for music use Off: a held note counts as a whistle); Manual "
-            "removes the frequency you set (AM, SSB, CW and narrow FM)."
+            or "Removes whistles (heterodynes) from the audio. Auto finds up to "
+            "three steady ones, the strongest first, and follows each as it "
+            "drifts, leaving voice alone (for music use Off: a held note counts "
+            "as a whistle); Manual removes the frequency you set (AM, SSB, CW "
+            "and narrow FM)."
         )
 
     def _on_notch_changed(self, *_args) -> None:
@@ -2478,21 +2572,36 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         low, high = NOTCH_RANGE_HZ
         self._notch_spin.setValue(int(round(min(max(value, low), high))))
 
-    def show_notch_found(self, hz: Optional[float]) -> None:
-        """Auto's readout: the whistle it removes (Hz), or None."""
-        if hz is None:
+    def show_notch_found(self, hz: Any) -> None:
+        """Auto's readout: what it removes: a whistle's frequency (Hz),
+        several (a sequence, the strongest first: up to three), or None."""
+        found = _frequencies(hz)
+        if not found:
             text = "None"
             tip = (
                 "Auto hears no steady whistle on the channel: the audio plays "
-                "as it is. It finds one within about half a second."
+                "as it is. It finds one within about half a second, and removes "
+                "up to three at once."
             )
+        elif len(found) == 1:
+            text = f"{found[0]:.0f} Hz"
+            tip = f"Auto removes a steady whistle at {found[0]:.1f} Hz"
         else:
-            text = f"{hz:.0f} Hz"
-            tip = f"Auto removes a steady whistle at {hz:.1f} Hz"
+            # (In order of frequency, so the row doesn't jump about when
+            # two are about as loud.)
+            text = ", ".join(f"{f:.0f}" for f in sorted(found)) + " Hz"
+            tip = (
+                f"Auto removes {len(found)} steady whistles, the strongest "
+                "first: " + ", ".join(f"{f:.1f} Hz" for f in found)
+            )
+        label = getattr(self, "_notch_label", None)
+        if label is not None:
+            label.setText("Whistles:" if len(found) > 1 else "Whistle:")
         if self._notch_found.text() != text:
             self._notch_found.setText(text)
+            set_tone(self._notch_found, "success" if found else "muted")
+        if self._notch_found.toolTip() != tip:
             self._notch_found.setToolTip(tip)
-            set_tone(self._notch_found, "success" if hz is not None else "muted")
 
     # -- the low cut (K-A2) -------------------------------------------------
 

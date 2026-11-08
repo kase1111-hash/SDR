@@ -38,6 +38,11 @@ STATES = {
         "TONE",
         "muted by the tone squelch: not the chosen CTCSS tone or DCS code",
     ),
+    "reverse": (
+        "TONE",
+        "muted by the reverse tone squelch: the station sends the CTCSS tone "
+        "or DCS code it mutes (or hasn't been heard long enough to tell)",
+    ),
     "off": ("OFF", "the squelch is off: everything plays, noise too"),
     "idle": ("I/Q", "no audio in None (I/Q) mode: choose AM, FM, USB, LSB or CW"),
     "none": ("—", "not receiving"),
@@ -239,7 +244,10 @@ class LevelMeter(QWidget if HAS_PYQT6 else object):
                 noise += f" (SNR {snr:.1f} dB)"
             lines.append(noise)
         lamp, meaning = STATES.get(self._state, STATES["none"])
-        if self._state in ("open", "closed", "tone") and self._threshold is not None:
+        if (
+            self._state in ("open", "closed", "tone", "reverse")
+            and self._threshold is not None
+        ):
             how = "Auto" if self._auto else "set by hand"
             lines.append(f"Squelch: {_format_db(self._threshold)} ({how}), {meaning}")
         else:
@@ -275,7 +283,7 @@ class LevelMeter(QWidget if HAS_PYQT6 else object):
             return "success", "lcd_text", "success_bg", "success"
         if state == "off":
             return "accent", "text", "surface0", "subtext"
-        if state in ("closed", "tone"):
+        if state in ("closed", "tone", "reverse"):
             return "surface2", "subtext", "surface0", "subtext"
         return "surface1", "subtext", "surface0", "subtext"
 

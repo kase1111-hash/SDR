@@ -367,6 +367,72 @@ class TestMorseText(_PanelCase):
         self.assertEqual(view.plain_text(), "")
         self.assertEqual(view.speed.text(), "–")
 
+    def test_receiving_goes_when_nothing_is_received(self):
+        # "Receiving" stayed above the Live entry after the receiver
+        # stopped, the decoder was turned Off or another protocol was
+        # chosen (the Second Receiver's entry takes it down, R8-05).
+        from sdr_module.dsp.live_decoders import LiveDecoderStatus
+
+        p = self.panel
+        view = p._cw_view
+        status = LiveDecoderStatus(
+            name="CW (Morse)", detail="18 WPM", live_text="CQ",
+            signal_measured=True, signal_present=True,
+        )  # fmt: skip
+
+        def receiving():
+            p._proto_combo.setCurrentText("CW (Morse)")
+            _settle(1)
+            p.set_receiving(True)
+            p.set_decoder_status(status)
+            self.assertEqual(
+                (view.speed.text(), view.state.text()), ("18 WPM", "Receiving")
+            )
+
+        receiving()
+        p.set_receiving(False)  # (Stop)
+        self.assertEqual((view.speed.text(), view.state.text()), ("18 WPM", ""))
+        self.assertEqual(view.plain_text(), "CQ")  # (what it heard stays)
+        receiving()
+        p._proto_combo.setCurrentText("Off")
+        _settle(1)
+        p.set_decoder_status(None)
+        self.assertEqual(view.state.text(), "")
+        receiving()
+        p._proto_combo.setCurrentText("POCSAG")
+        _settle(1)
+        p.set_decoder_status(LiveDecoderStatus(name="POCSAG"))
+        self.assertEqual(view.state.text(), "")
+
+
+class TestReceivingGoesWhenTheWindowStops(_WindowTestCase):
+    """The main window's Stop says so above the Text view's Live entry, as
+    the Second Receiver's Stop does above its own (R8-05)."""
+
+    demo = True
+
+    def test_stop(self):
+        from sdr_module.dsp.live_decoders import LiveDecoderStatus
+
+        win = self.win
+        panel = win._decoder_panel
+        view = panel._cw_view
+        panel._proto_combo.setCurrentText("CW (Morse)")
+        self.settle(2)
+        if not win._is_running:
+            win._start_acquisition()
+        self.settle(1)
+        panel.set_decoder_status(
+            LiveDecoderStatus(
+                name="CW (Morse)", detail="15 WPM", live_text="VVV",
+                signal_measured=True, signal_present=True,
+            )  # fmt: skip
+        )
+        self.assertEqual(view.state.text(), "Receiving")
+        win._stop_acquisition()
+        self.settle(1)
+        self.assertEqual((view.speed.text(), view.state.text()), ("15 WPM", ""))
+
 
 # --------------------------------------------------------------------------- #
 # Auto

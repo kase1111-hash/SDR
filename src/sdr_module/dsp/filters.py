@@ -2076,6 +2076,44 @@ def ctcss_label(frequency: float) -> str:
     return f"{text} ({code})" if code else text
 
 
+#: (M-Q2) The reverse burst many radios end a CTCSS transmission with:
+#: the tone's phase shifted by this much (Kenwood's and most others' 180
+#: degrees; Motorola's 120) for this long (150 ms; Motorola's about 180)
+#: before the carrier drops. :class:`CTCSSDetector` hears any shift of
+#: more than 90 degrees.
+CTCSS_BURST_DEG = 180.0
+CTCSS_BURST_S = 0.15
+
+
+def ctcss_transmission(
+    tone_hz: float,
+    rate: float = 48000.0,
+    seconds: Optional[float] = None,
+    samples: Optional[int] = None,
+    burst_s: Optional[float] = None,
+    shift_deg: float = CTCSS_BURST_DEG,
+) -> np.ndarray:
+    """(M-Q2) A CTCSS tone (a cosine, amplitude 1) for ``seconds`` (or
+    ``samples``) at ``rate``, then its reverse burst: ``burst_s`` more
+    (:data:`CTCSS_BURST_S` when None; 0 for none) of the tone with its
+    phase shifted by ``shift_deg``, the shift made over 5 ms (a raised
+    cosine, as a transmitter's tone filter smooths the step) so the
+    waveform doesn't jump. Scale it to the deviation it is sent at."""
+    rate = float(rate)
+    if samples is None:
+        samples = int(round(float(seconds or 0.0) * rate))
+    tone_n = max(0, int(samples))
+    burst = CTCSS_BURST_S if burst_s is None else max(0.0, float(burst_s))
+    n = tone_n + int(round(burst * rate))
+    angle = (2.0 * np.pi * float(tone_hz) / rate) * np.arange(n)
+    if n > tone_n:
+        ramp = np.clip(np.arange(n - tone_n) / (0.005 * rate), 0.0, 1.0)
+        angle[tone_n:] += np.radians(float(shift_deg)) * (
+            0.5 - 0.5 * np.cos(np.pi * ramp)
+        )
+    return np.cos(angle)
+
+
 def _kaiser_lowpass(
     pass_hz: float, stop_hz: float, rate: float, atten_db: float = 60.0
 ) -> np.ndarray:
@@ -2109,7 +2147,42 @@ class CTCSSDetector:
 
     :attr:`detected_tone` is the tone found (Hz) or None; :meth:`is_present`
     asks about one tone (the tone squelch).
+
+    (M-Q2) A tone held may end with its reverse burst, as many radios end
+    a transmission (also called squelch tail elimination): the microphone
+    off, the tone goes on with its phase shifted (180 degrees for about
+    150 ms on Kenwood's and most others', 120 degrees for about 180 ms on
+    Motorola's; 135 and 240 are met too) before the carrier drops, so the
+    squelch closes before the noise of the dropped carrier. It is looked
+    for in the CTCSS band alone (below ``BURST_BAND_HZ``: the voice above
+    is left out): each new sample ends three windows of
+    ``BURST_WINDOW_S``, and the burst is there when each holds the tone
+    and little else (``BURST_CLEAN`` of its power), the latest at the
+    level of the one before it (within ``BURST_LEVEL``) but shifted by
+    more than 90 degrees (``BURST_SHIFT_COS``), and the one before that
+    agreeing with it (``BURST_STEADY_COS``: the tone was steady, not a
+    voice's harmonic passing by). The tone is then let go at once
+    (:attr:`burst_heard`, :attr:`bursts`) and the next ``BURST_HOLD_S`` of
+    audio (the rest of the burst) isn't listened to: the tone is found
+    again only in what follows.
+
+    ``reverse_burst`` (True by default; settable while audio runs) switches
+    the burst on or off, as radios' squelch tail elimination (STE) menus
+    do: a voice pitched near the tone, sent with little filtering, can
+    sound like a burst now and then. Off, nothing is looked for (the band
+    filter isn't run) and a tone is held until it stops, as before M-Q2.
     """
+
+    #: (M-Q2) The reverse burst: see above.
+    BURST_WINDOW_S = 0.06
+    BURST_CLEAN = 0.7
+    BURST_LEVEL = 2.0
+    BURST_SHIFT_COS = 0.0
+    BURST_STEADY_COS = 0.7
+    BURST_HOLD_S = 0.3
+    #: The band the burst is looked for in: passed up to the first, gone
+    #: from the second (every tone, up to 254.1 Hz, and no voice).
+    BURST_BAND_HZ = (265.0, 340.0)
 
     def __init__(
         self,
@@ -2120,7 +2193,10 @@ class CTCSSDetector:
         select_db: float = 6.0,
         snr_db: float = 10.0,
         update_s: float = 0.05,
+        reverse_burst: bool = True,
     ):
+        #: Whether a reverse burst lets the tone go (see above).
+        self.reverse_burst = bool(reverse_burst)
         self._rate = float(sample_rate)
         self._factor = max(1, int(self._rate // 1200.0))
         self._out_rate = self._rate / self._factor
@@ -2141,6 +2217,10 @@ class CTCSSDetector:
         phase = 2.0 * np.pi * tones[:, None] * n[None, :] / self._out_rate
         self._cos = window * np.cos(phase)
         self._sin = window * np.sin(phase)
+        # (M-Q2) The reverse burst's band filter, windows and hold.
+        self._band_taps = _kaiser_lowpass(*self.BURST_BAND_HZ, self._out_rate, 40.0)
+        self._burst_n = max(8, int(round(self.BURST_WINDOW_S * self._out_rate)))
+        self._burst_hold_n = int(round(self.BURST_HOLD_S * self._out_rate))
         self.reset()
 
     def reset(self) -> None:
@@ -2154,11 +2234,37 @@ class CTCSSDetector:
         self._since_update = 0  # decimated samples since the last check
         self._found: Optional[float] = None
         self.tone_powers: Optional[np.ndarray] = None
+        # (M-Q2) The reverse burst.
+        self._band_history = np.zeros(len(self._band_taps) - 1)
+        self._band_tail = np.zeros(0)  # the CTCSS band's last 3 windows
+        self._deaf = 0  # decimated samples not listened to (a burst's rest)
+        self._listened = 0  # decimated samples since the reset or a burst
+        self._burst = False
+        # Samples went by with reverse_burst off: the band's history and
+        # windows are not the samples just before the next ones.
+        self._band_stale = False
+        #: Reverse bursts heard since the last reset.
+        self.bursts = 0
 
     @property
     def detected_tone(self) -> Optional[float]:
         """The tone (Hz) heard in the last second, or None."""
         return self._detected
+
+    @property
+    def burst_heard(self) -> bool:
+        """Whether the tone last held ended with a reverse burst (until a
+        tone is found again)."""
+        return self._burst
+
+    @property
+    def heard_s(self) -> float:
+        """Seconds of audio a tone is found from now: since the reset, or
+        since the reverse burst that ended the last one (its rest not
+        counted). A tone there all along is found once this passes
+        ``min_window_s``: whether one is absent can only be told after
+        that (the reverse tone squelch waits for it)."""
+        return self._listened / self._out_rate
 
     def is_present(self, frequency: float) -> bool:
         """Whether ``frequency`` (Hz) is the tone being heard."""
@@ -2184,6 +2290,19 @@ class CTCSSDetector:
         if x.size == 0:
             return self._detected
         low = self._decimate(x)
+        burst = None
+        if self.reverse_burst:
+            burst = self._burst_in(low)
+        elif low.size:
+            self._band_stale = True
+        if burst is not None:
+            self._end_with_burst()
+            low = low[burst + 1 :]  # (what follows it)
+        if self._deaf and low.size:
+            skip = min(self._deaf, low.size)
+            self._deaf -= skip
+            low = low[skip:]
+        self._listened = min(self._listened + low.size, 1 << 40)
         if low.size:
             if low.size >= self._window_n:
                 self._buffer = low[-self._window_n :].copy()
@@ -2201,11 +2320,82 @@ class CTCSSDetector:
         if found is not None:
             self._detected = found
             self._hold = self._hold_s
+            self._burst = False
         else:
             self._hold -= seconds
             if self._hold <= 0.0:
                 self._detected = None
         return self._detected
+
+    def _burst_in(self, low: np.ndarray) -> Optional[int]:
+        """(M-Q2) Where in ``low`` (new decimated samples) the reverse burst
+        of the tone held was heard (the sample ending the window that
+        showed it), or None. Keeps the CTCSS band's last three windows."""
+        if low.size == 0:
+            return None
+        taps = self._band_taps
+        if self._band_stale:
+            # (Switched back on: what the band held is from before samples
+            # that went by unheard, so it starts afresh, as after a reset.)
+            self._band_stale = False
+            self._band_history = np.zeros(len(taps) - 1)
+            self._band_tail = np.zeros(0)
+        buf = np.concatenate((self._band_history, low))
+        self._band_history = buf[len(buf) - (len(taps) - 1) :].copy()
+        band = np.convolve(buf, taps, mode="valid")  # (one per new sample)
+        w = self._burst_n
+        tail = self._band_tail
+        seg = np.concatenate((tail, band))
+        self._band_tail = seg[-3 * w :].copy()
+        tone = self._detected
+        if tone is None or seg.size < 3 * w:
+            return None
+        omega = 2.0 * np.pi * tone / self._out_rate
+        turn = np.exp(-1j * omega * np.arange(seg.size))
+        zero = np.zeros(1)
+        s = np.concatenate((zero, np.cumsum(seg * turn)))
+        s1 = np.concatenate((zero, np.cumsum(seg)))
+        q = np.concatenate((zero, np.cumsum(seg * seg)))
+        # Every window of w samples (index i ends at sample w + i): its
+        # tone (DC taken out) and the power left besides its DC.
+        ends = np.arange(w, seg.size + 1)
+        mean = (s1[ends] - s1[ends - w]) / w
+        gain = np.sum(np.exp(-1j * omega * np.arange(w)))  # (DC's leak)
+        phasor = (s[ends] - s[ends - w]) - mean * turn[ends - w] * gain
+        power = (q[ends] - q[ends - w]) - w * mean * mean
+        tone_power = (2.0 / w) * np.abs(phasor) ** 2
+        clean = (tone_power >= self.BURST_CLEAN * power) & (tone_power > 0.0)
+        # The windows ending at the new samples, each with the two before.
+        late = np.arange(max(2 * w, tail.size + 1 - w), ends.size)
+        if late.size == 0:
+            return None
+        early, earlier = late - w, late - 2 * w
+        a, b, c = phasor[late], phasor[early], phasor[earlier]
+        size_a, size_b, size_c = np.abs(a), np.abs(b), np.abs(c)
+        heard = clean[late] & clean[early] & clean[earlier]
+        heard &= tone_power[late] * self.BURST_LEVEL >= tone_power[early]
+        heard &= tone_power[late] <= self.BURST_LEVEL * tone_power[early]
+        heard &= np.real(a * np.conj(b)) <= self.BURST_SHIFT_COS * size_a * size_b
+        heard &= np.real(b * np.conj(c)) >= self.BURST_STEADY_COS * size_b * size_c
+        hits = np.flatnonzero(heard)
+        if hits.size == 0:
+            return None
+        return int(w + late[hits[0]] - 1 - tail.size)
+
+    def _end_with_burst(self) -> None:
+        """(M-Q2) Let the tone go at once: found again only in what follows
+        the rest of its burst."""
+        self._detected = None
+        self._found = None
+        self._hold = 0.0
+        self._buffer = np.zeros(self._window_n)
+        self._filled = 0
+        self._since_update = 0
+        self._band_tail = np.zeros(0)
+        self._deaf = self._burst_hold_n
+        self._listened = 0
+        self._burst = True
+        self.bursts += 1
 
     def _strongest_tone(self) -> Optional[float]:
         """The tone that stands out in the window now, or None."""

@@ -32,7 +32,10 @@ RDS         channel (+/-100 kHz, ~250 kHz) -> FM discriminator (multiplex)
 Each decoder reports its health in :attr:`LiveDecoder.status` (frames
 found, valid and failed, when the last message came, whether a signal is
 in the channel and any problem, such as a sample rate too low for ADS-B),
-which the Decoder panel shows.
+which the Decoder panel shows. Below 2.5 MS/s the ADS-B decoder's work per
+second is bounded: in a very busy sky it reads the clearest replies first
+and leaves the rest, counted in its status (``skipped``, ``skipped_per_s``)
+and said in plain words by :func:`skipped_text`.
 
 To add a protocol, subclass :class:`LiveDecoder` (or :class:`ChannelDecoder`
 for a narrow channel) and register the class in :data:`LIVE_DECODERS` under
@@ -41,6 +44,7 @@ the name the Decoder panel lists. NumPy only; no Qt.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -86,10 +90,31 @@ __all__ = [
     "RDSLiveDecoder",
     "LIVE_DECODERS",
     "create_live_decoder",
+    "audio_input",
     "describe_message",
     "message_details",
     "format_rate",
+    "skipped_text",
+    "skipped_tip",
+    "SKIPPED_WINDOW_S",
+    "SKIPPED_SETTLE_S",
+    "SKIPPED_MIN_PER_S",
 ]
+
+#: ADS-B's replies skipped a second (``LiveDecoderStatus.skipped_per_s``)
+#: are counted over this much of the latest signal: it reads 0 again (and
+#: the Decoder tab's line clears) once none was skipped in it.
+SKIPPED_WINDOW_S = 3.0
+#: ... and only once they have been left unread for this long (seconds of
+#: signal from the first to the latest): the decoder's budget lets a burst
+#: through at once, so the first moments of a busy spell leave few unread,
+#: and a burst isn't worth a warning.
+SKIPPED_SETTLE_S = 0.5
+#: ... and at this many a second or more: at the edge of the budget a few
+#: go unread now and then (5 a second of 20,000 in the synthetic sky),
+#: which costs next to no decodes and isn't worth a warning either. Once
+#: said, the rate is said until it clears, however low it falls.
+SKIPPED_MIN_PER_S = 100.0
 
 
 def format_rate(rate_hz: float) -> str:
@@ -138,6 +163,76 @@ class LiveDecoderStatus:
     detail: str = ""
     #: Text still being received (Morse: the line in progress), or "".
     live_text: str = ""
+    #: ADS-B below 2.5 MS/s: replies left unread since the decoder started
+    #: (its work per second is bounded: the clearest are read first), and
+    #: how many a second over the last ``SKIPPED_WINDOW_S`` of signal (0
+    #: once none were, and while too few to be worth saying: see
+    #: ``ADSBLiveDecoder.skipped_per_s``). Other decoders: 0.
+    skipped: int = 0
+    skipped_per_s: float = 0.0
+
+
+def _about(count: float) -> str:
+    """A count in two figures: ``873 -> "870"``, ``4519 -> "4,500"``,
+    ``4.6 -> "5"``."""
+    value = float(count)
+    if value < 10:
+        return f"{max(1, round(value))}"
+    scale = 10 ** (int(math.floor(math.log10(value))) - 1)
+    return f"{int(round(value / scale) * scale):,}"
+
+
+def skipped_text(per_s: float, sample_rate: float, recording: bool = False) -> str:
+    """What the Decoder tab says while ADS-B leaves replies unread in a
+    very busy sky (``per_s`` a second, see ``LiveDecoderStatus``), and what
+    helps at ``sample_rate`` ("" while none are). ``recording``: a recording
+    plays, whose rate can't be changed."""
+    try:
+        per_s = float(per_s)
+    except (TypeError, ValueError):
+        return ""
+    if not (math.isfinite(per_s) and per_s > 0):
+        return ""
+    text = (
+        f"Busy sky: about {_about(per_s)} replies a second weren't read "
+        "(the clearest are read first)."
+    )
+    if recording:
+        return text
+    if float(sample_rate) < 2.4e6:
+        return text + " 2.4 MS/s reads more of them, 2.56 MS/s or more every one."
+    return text + " 2.56 MS/s or more reads every one."
+
+
+#: Where the main window's sample rate is chosen (:func:`skipped_tip`).
+SAMPLE_RATE_PLACE = "Receiver > Sample rate (or click the rate in the status bar)"
+
+
+def skipped_tip(
+    per_s: float,
+    sample_rate: float,
+    recording: bool = False,
+    where: str = SAMPLE_RATE_PLACE,
+) -> str:
+    """The longer story behind :func:`skipped_text` (a tooltip); ``where``
+    names the control that sets the rate (the Second Receiver has its
+    own)."""
+    rate = format_rate(sample_rate)
+    tip = (
+        f"Below 2.5 MS/s the ADS-B decoder reads only so many replies a second, "
+        "so that it never holds up the display: in a very busy sky (more than "
+        "about 15,000 replies a second, the older Mode A/C ones included) it "
+        "reads the clearest first and leaves the rest, the least clear, which "
+        f"are weak or overlap others and seldom decode. At {rate}, about "
+        f"{_about(per_s)} a second were left over the last "
+        f"{SKIPPED_WINDOW_S:.0f} seconds."
+    )
+    if recording:
+        return tip + " A recording made at 2.56 MS/s or more is read in full."
+    return tip + (
+        " From 2.5 MS/s there is no such limit: choose 2.56 MS/s or more in "
+        f"{where}."
+    )
 
 
 class LiveDecoder:
@@ -274,12 +369,27 @@ class ChannelDecoder(LiveDecoder):
     its power against the channel's noise floor, every 50 ms, and how much
     of that signal went by without a valid message (forgotten when the
     channel changes or stays quiet for ``_QUIET_S``).
+
+    With ``audio`` the input is a receiver's audio instead (real samples at
+    ``sample_rate``, an audio recording's): what its FM discriminator
+    (``AUDIO`` "FM") or AM detector ("AM") gave, which :meth:`_from_audio`
+    decodes as :meth:`_demodulate` does the channel's after demodulating
+    it. Its level and polarity don't matter (the protocols' slicers and
+    sync searches take either), nor a DC offset; pager audio must be the
+    discriminator's (flat, not de-emphasised or cut below 300 Hz as a
+    speaker's is), AFSK and MSK tones are any audio's.
     """
 
     PASS_HZ = 8e3
     STOP_HZ = 12e3
     TARGET_RATE = 48e3
     MIN_SAMPLE_RATE = 16e3
+    #: The receiver's audio the protocol is decoded from with ``audio``:
+    #: "FM" (its discriminator's output) or "AM" (its AM detector's); ""
+    #: for none (it is decoded from I/Q only).
+    AUDIO = ""
+    #: The lowest audio rate it is decoded from.
+    MIN_AUDIO_RATE = 8e3
     # Signal detection: power this far above the floor (the 20th
     # percentile of the last FLOOR_S seconds, once WARMUP_S are in).
     _SEGMENT_S = 0.05
@@ -297,12 +407,25 @@ class ChannelDecoder(LiveDecoder):
         sample_rate: float,
         offset_hz: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
+        audio: bool = False,
     ):
         super().__init__(sample_rate, offset_hz, clock)
-        self._channelizer = Channelizer(
-            self.sample_rate, offset_hz, self.PASS_HZ, self.STOP_HZ, self.TARGET_RATE
-        )
-        self.channel_rate = self._channelizer.output_rate
+        #: The input is a receiver's audio (real samples), not I/Q.
+        self.audio = bool(audio)
+        if self.audio and not self.AUDIO:
+            raise ValueError(f"{self.name} isn't decoded from a receiver's audio")
+        self._channelizer: Optional[Channelizer] = None
+        if self.audio:
+            self.channel_rate = self.sample_rate
+        else:
+            self._channelizer = Channelizer(
+                self.sample_rate,
+                offset_hz,
+                self.PASS_HZ,
+                self.STOP_HZ,
+                self.TARGET_RATE,
+            )
+            self.channel_rate = self._channelizer.output_rate
         self._segment_len = max(1, int(round(self._SEGMENT_S * self.channel_rate)))
         self._reset_presence()
         self._build()
@@ -322,7 +445,14 @@ class ChannelDecoder(LiveDecoder):
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
         raise NotImplementedError
 
+    def _from_audio(self, audio: np.ndarray) -> List[DecodedMessage]:
+        """Messages in a block of the receiver's audio (``AUDIO``)."""
+        raise NotImplementedError
+
     def set_offset(self, offset_hz: float) -> None:
+        if self._channelizer is None:  # (audio: no channel to move)
+            super().set_offset(offset_hz)
+            return
         changed = float(offset_hz) != self._channelizer.offset_hz
         super().set_offset(offset_hz)
         self._channelizer.set_offset(offset_hz)
@@ -335,11 +465,16 @@ class ChannelDecoder(LiveDecoder):
 
     def reset(self) -> None:
         super().reset()
-        self._channelizer.reset()
+        if self._channelizer is not None:
+            self._channelizer.reset()
         self._reset_presence()
         self._build()
 
     def _decode(self, iq: np.ndarray) -> List[DecodedMessage]:
+        if self._channelizer is None:
+            # A receiver's audio: the signal itself, no channel to measure
+            # one in (an FM discriminator's noise is louder than a signal).
+            return self._from_audio(np.real(iq).astype(np.float64))
         channel = self._channelizer.process(iq)
         if not len(channel):
             return []
@@ -394,7 +529,7 @@ class ChannelDecoder(LiveDecoder):
             base,
             channel_rate=self.channel_rate,
             signal_present=present,
-            signal_measured=True,
+            signal_measured=not self.audio,
             undecoded_signal_s=self._undecoded,
         )
 
@@ -417,6 +552,7 @@ class POCSAGLiveDecoder(ChannelDecoder):
 
     name = "POCSAG"
     unit = "page"
+    AUDIO = "FM"
     _DC_S = 0.25
 
     def _build(self) -> None:
@@ -429,7 +565,10 @@ class POCSAGLiveDecoder(ChannelDecoder):
         return [self._decoder]
 
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
-        baseband = self._dc.process(self._fm.process(channel))
+        return self._from_audio(self._fm.process(channel))
+
+    def _from_audio(self, audio: np.ndarray) -> List[DecodedMessage]:
+        baseband = self._dc.process(audio)
         return list(self._decoder.decode(baseband))
 
 
@@ -446,6 +585,7 @@ class FLEXLiveDecoder(ChannelDecoder):
 
     name = "FLEX"
     unit = "page"
+    AUDIO = "FM"
     _OTHER_SPEED_S = 6.0
 
     def _build(self) -> None:
@@ -476,9 +616,11 @@ class FLEXLiveDecoder(ChannelDecoder):
         self._valid_before = self._valid
 
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
+        return self._from_audio(self._fm.process(channel))
+
+    def _from_audio(self, audio: np.ndarray) -> List[DecodedMessage]:
         before = self._decoder.unsupported_frames
-        baseband = self._fm.process(channel)
-        messages: List[DecodedMessage] = list(self._decoder.decode(baseband))
+        messages: List[DecodedMessage] = list(self._decoder.decode(audio))
         if self._decoder.unsupported_frames > before:
             self._other_speed_s = self._stream_s
         return messages
@@ -507,6 +649,7 @@ class AX25LiveDecoder(ChannelDecoder):
 
     name = "AX.25/APRS"
     unit = "packet"
+    AUDIO = "FM"
     MARK_HZ = 1200.0
     SPACE_HZ = 2200.0
     BAUD = 1200
@@ -525,7 +668,9 @@ class AX25LiveDecoder(ChannelDecoder):
         return [self._decoder]
 
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
-        audio = self._fm.process(channel)
+        return self._from_audio(self._fm.process(channel))
+
+    def _from_audio(self, audio: np.ndarray) -> List[DecodedMessage]:
         mark = np.abs(self._mark_avg.process(self._mark.process(audio)))
         space = np.abs(self._space_avg.process(self._space.process(audio)))
         # Mark minus space, normalised: twist (one tone louder, as after
@@ -549,9 +694,11 @@ class ACARSLiveDecoder(ChannelDecoder):
 
     name = "ACARS"
     unit = "message"
+    AUDIO = "AM"
     PASS_HZ = 5e3
     STOP_HZ = 8e3
     MIN_SAMPLE_RATE = 9.6e3
+    MIN_AUDIO_RATE = 9.6e3
     CENTER_HZ = 1800.0
     BAUD = 2400
     _PHASE_BITS = 32
@@ -574,8 +721,11 @@ class ACARSLiveDecoder(ChannelDecoder):
         return [self._decoder]
 
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
-        envelope = np.abs(channel).astype(np.float64)
-        audio = self._dc.process(envelope)
+        return self._from_audio(np.abs(channel).astype(np.float64))
+
+    def _from_audio(self, audio: np.ndarray) -> List[DecodedMessage]:
+        # (The envelope's mean, the carrier, or an AM detector's DC.)
+        audio = self._dc.process(audio)
         phasor = self._rotate.process(self._lowpass.process(self._mix.process(audio)))
         squared = self._phase_avg.process(phasor.astype(np.complex128) ** 2)
         angle = np.unwrap(np.concatenate(([self._angle], np.angle(squared))))[1:]
@@ -915,6 +1065,17 @@ class ADSBLiveDecoder(LiveDecoder):
     ):
         super().__init__(sample_rate, offset_hz, clock)
         self._decoder: Optional[ADSBDecoder] = None
+        # Replies skipped (see skipped): the demodulator's count at the
+        # start, and (stream seconds, count) after each block of the last
+        # SKIPPED_WINDOW_S, the one before it kept as the baseline.
+        self._skip_base = 0
+        self._skip_marks: Deque[Tuple[float, int]] = deque([(0.0, 0)])
+        # Stream seconds when the busy spell now going on began (None: calm),
+        # when its latest block left replies unread, and whether it is worth
+        # saying (see skipped_per_s).
+        self._skipping_since: Optional[float] = None
+        self._last_skip_s = 0.0
+        self._spell_said = False
         if self.sample_rate < self.MIN_SAMPLE_RATE and recording:
             self._problem = _too_slow(self.name, self.MIN_SAMPLE_RATE, self.sample_rate)
         elif self.sample_rate < self.MIN_SAMPLE_RATE:
@@ -932,6 +1093,49 @@ class ADSBLiveDecoder(LiveDecoder):
     def _decoders(self) -> List[ProtocolDecoder]:
         return [self._decoder] if self._decoder is not None else []
 
+    @property
+    def skipped(self) -> int:
+        """Replies left unread since the decoder started (or was reset):
+        below 2.5 MS/s its work per second is bounded, and in a very busy
+        sky it reads the clearest first (0 from 2.5 MS/s)."""
+        fine = getattr(self._decoder, "_fine", None)
+        if fine is None:
+            return 0
+        return max(0, int(fine.skipped) - self._skip_base)
+
+    @property
+    def skipped_per_s(self) -> float:
+        """Replies left unread a second over the last ``SKIPPED_WINDOW_S``
+        of signal, from the first block that left some after a calm spell;
+        0 until they have been left unread for ``SKIPPED_SETTLE_S`` at
+        ``SKIPPED_MIN_PER_S`` or more a second (a burst, or a few now and
+        then, isn't worth saying), and once none were left for
+        ``SKIPPED_WINDOW_S``."""
+        return self._spell_rate() if self._spell_said else 0.0
+
+    def _spell_rate(self) -> float:
+        """Replies left unread a second in the busy spell's window."""
+        first_s, first = self._skip_marks[0]
+        last_s, last = self._skip_marks[-1]
+        if self._skipping_since is None or last <= first or last_s <= first_s:
+            return 0.0
+        return (last - first) / (last_s - first_s)
+
+    def reset(self) -> None:
+        super().reset()
+        fine = getattr(self._decoder, "_fine", None)
+        self._skip_base = int(fine.skipped) if fine is not None else 0
+        self._skip_marks = deque([(self._stream_s, 0)])
+        self._skipping_since = None
+        self._last_skip_s = self._stream_s
+        self._spell_said = False
+
+    @property
+    def status(self) -> LiveDecoderStatus:
+        return replace(
+            super().status, skipped=self.skipped, skipped_per_s=self.skipped_per_s
+        )
+
     def _decode(self, iq: np.ndarray) -> List[DecodedMessage]:
         if self._decoder is None:
             return []
@@ -939,7 +1143,32 @@ class ADSBLiveDecoder(LiveDecoder):
             magnitude = np.abs(iq).astype(np.float32, copy=False)
         else:
             magnitude = np.abs(np.asarray(iq, dtype=np.float32))
-        return list(self._decoder.decode(magnitude))
+        messages: List[DecodedMessage] = list(self._decoder.decode(magnitude))
+        # (process() counted this block's seconds in _stream_s already.)
+        marks, now, count = self._skip_marks, self._stream_s, self.skipped
+        last_s, last = marks[-1]
+        if count > last and last <= marks[0][1]:
+            # A busy spell after a calm one: counted from this block on, not
+            # diluted by the calm seconds before it.
+            marks.clear()
+            marks.append((last_s, last))
+            self._skipping_since = last_s
+        if count > last:
+            self._last_skip_s = now
+        marks.append((now, count))
+        while len(marks) > 2 and marks[1][0] <= now - SKIPPED_WINDOW_S:
+            marks.popleft()
+        since = self._skipping_since
+        if count <= marks[0][1] or since is None:
+            self._skipping_since = None  # (none left for the whole window)
+            self._spell_said = False
+        elif (
+            not self._spell_said
+            and self._last_skip_s - since >= SKIPPED_SETTLE_S
+            and self._spell_rate() >= SKIPPED_MIN_PER_S
+        ):
+            self._spell_said = True  # (until it clears)
+        return messages
 
 
 #: Decoder panel name -> live decoder class.
@@ -985,18 +1214,35 @@ def _too_slow(name: str, low: float, rate: float) -> str:
     return f"{name} needs at least {needs}; this recording is {format_rate(rate)}"
 
 
+def audio_input(name: str) -> str:
+    """The receiver's audio protocol ``name`` is decoded from
+    (``create_live_decoder(..., audio=True)``): "FM" (its FM
+    discriminator's output: APRS, POCSAG, FLEX), "AM" (its AM detector's:
+    ACARS) or "" (none: decoded from I/Q only)."""
+    cls = live_decoder_class(name)
+    return str(getattr(cls, "AUDIO", "") or "") if cls is not None else ""
+
+
 def create_live_decoder(
-    name: str, sample_rate: float, offset_hz: float = 0.0, recording: bool = False
+    name: str,
+    sample_rate: float,
+    offset_hz: float = 0.0,
+    recording: bool = False,
+    audio: bool = False,
 ) -> LiveDecoder:
     """A live decoder for protocol ``name`` (a Decoder panel name such as
     "AX.25/APRS", or an alias such as "aprs") at ``sample_rate``, its
     channel ``offset_hz`` from the centre of the samples. ``recording``:
     the samples come from a recording playing (a rate too low for the
-    protocol is worded for it: its rate can't be changed).
+    protocol is worded for it: its rate can't be changed). ``audio``: the
+    samples are a receiver's audio at ``sample_rate`` (real, an audio
+    recording's), decoded after the receiver's own FM discriminator or AM
+    detector (see :func:`audio_input`); ``offset_hz`` is unused.
 
     Raises:
-        ValueError: unknown protocol, or a sample rate too low for it
-            (except ADS-B, which reports a low rate in its status).
+        ValueError: unknown protocol, a sample rate too low for it (except
+            ADS-B, which reports a low rate in its status), or ``audio``
+            for a protocol not decoded from a receiver's audio.
     """
     cls = live_decoder_class(name)
     if cls is None:
@@ -1004,6 +1250,17 @@ def create_live_decoder(
     rate = float(sample_rate)
     if not rate > 0:
         raise ValueError(f"sample rate must be positive, got {rate:g}")
+    if audio:
+        if not (issubclass(cls, ChannelDecoder) and cls.AUDIO):
+            raise ValueError(
+                f"{cls.name} isn't decoded from a receiver's audio, only from I/Q"
+            )
+        if rate < cls.MIN_AUDIO_RATE:
+            raise ValueError(
+                f"{cls.name} needs audio at {format_rate(cls.MIN_AUDIO_RATE)} or "
+                f"more; this is {format_rate(rate)}"
+            )
+        return cls(rate, offset_hz, audio=True)
     if cls is ADSBLiveDecoder:
         return ADSBLiveDecoder(rate, offset_hz, recording=recording)
     if rate < cls.MIN_SAMPLE_RATE and recording:

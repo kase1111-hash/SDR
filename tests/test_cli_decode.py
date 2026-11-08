@@ -7,6 +7,7 @@ real AFSK APRS or ACARS never decoded.
 """
 
 import numpy as np
+import pytest
 
 from sdr_module.cli import main
 from sdr_module.dsp import protocol_encoders as enc
@@ -117,3 +118,302 @@ def test_a_malformed_aprs_packet_does_not_stop_the_listing(tmp_path, capsys):
     assert (
         "  [1] N0CALL-9>APZ001  49.0583, -72.0292  ·  Car  ·  After the bad one" in out
     )
+
+
+class TestAudioRecordings:
+    """R7L-2: ``sdr-scan decode`` read a one-channel WAV file at an audio
+    rate (a receiver's sound) as I/Q, so only Morse decoded from it, while
+    File > Decode Recording decodes such a file's sound as a receiver's
+    audio. Now the command does as the window does (the same live decoders,
+    fed the file's own samples), and says it read the file as audio."""
+
+    @staticmethod
+    def _wav(path, audio, rate):
+        from tests.wav_builders import iq_wav
+
+        iq_wav(path, audio, "int", 2, int(rate))
+        return path
+
+    def test_receiver_audio_decodes(self, tmp_path, capsys):
+        from tests.test_audio_decoding import EXPECTED, _audio
+
+        for name, protocol, rate in (
+            ("AX.25/APRS", "aprs", 48000),
+            ("POCSAG", "pocsag", 22050),
+            ("FLEX", "flex", 48000),
+            ("ACARS", "acars", 22050),
+        ):
+            path = self._wav(tmp_path / f"{protocol}.wav", _audio(name, rate), rate)
+            assert main(["decode", protocol, "-i", str(path)]) == 0, protocol
+            out = capsys.readouterr().out
+            assert "one channel" in out and "as a receiver's audio" in out, out
+            detector = "AM detector" if protocol == "acars" else "FM discriminator"
+            assert detector in out, out
+            expected = EXPECTED[name]
+            assert f"Decoded {len(expected)} {protocol.upper()} message(s)" in out
+            for address, content in expected:
+                assert f"{address}  {content}" in out, (protocol, out)
+
+    def test_a_rate_too_low_is_said(self, tmp_path, capsys):
+        from tests.test_audio_decoding import _audio
+
+        path = self._wav(tmp_path / "slow.wav", _audio("POCSAG", 8000)[::2], 4000)
+        assert main(["decode", "pocsag", "-i", str(path)]) == 1
+        out = capsys.readouterr().out
+        assert "Error: POCSAG needs audio at 8 kS/s or more; this is 4 kS/s" in out
+
+    def test_a_header_without_a_rate_takes_the_one_given(self, tmp_path, capsys):
+        from tests.test_audio_decoding import _audio
+        from tests.wav_builders import encode, fmt_body, write_wav
+
+        path = tmp_path / "rate0.wav"
+        write_wav(
+            path, fmt_body(1, 0, 2), encode(_audio("AX.25/APRS", 48000), "int", 2)
+        )
+        assert main(["decode", "aprs", "-i", str(path)]) == 1
+        assert "sample rate unknown" in capsys.readouterr().out
+        argv = ["decode", "aprs", "-i", str(path), "--sample-rate", "48000"]
+        assert main(argv) == 0
+        out = capsys.readouterr().out
+        assert "as a receiver's audio" in out
+        assert "Decoded 1 APRS message(s)" in out
+
+    def test_morse_and_fast_captures_are_still_read_as_iq(self, tmp_path, capsys):
+        """(Morse decodes at its pitch from the I/Q, as in the window; a
+        one-channel file above 200 kHz is an IF or RF sampled directly: the
+        radio signal itself, read as I/Q.)"""
+        rate = 48000
+        tone = np.real(enc.cw_baseband("CQ DE N0CALL", rate, 20, offset_hz=700.0))
+        pad = np.zeros(rate // 2)
+        path = self._wav(
+            tmp_path / "cw.wav", 0.5 * np.concatenate([pad, tone, pad]), rate
+        )
+        assert main(["decode", "cw", "-i", str(path), "--offset", "-11300"]) == 0
+        out = capsys.readouterr().out
+        assert "as a receiver's audio" not in out
+        assert "CQ DE N0CALL" in out
+
+        fast = 480000
+        burst = enc.aprs_baseband(
+            "N0CALL-9", "APZ001", "!4903.50N/07201.75W>IF", fast, ["WIDE1-1"]
+        )
+        pad = np.zeros(int(0.2 * fast))
+        z = np.concatenate([pad, 0.5 * burst, pad])
+        real = np.real(z * np.exp(2j * np.pi * 150e3 * np.arange(len(z)) / fast))
+        path = self._wav(tmp_path / "if.wav", real, fast)
+        # (I/Q at 240 kS/s centered on 120 kHz: the packet 30 kHz above.)
+        assert main(["decode", "aprs", "-i", str(path), "--offset", "30000"]) == 0
+        out = capsys.readouterr().out
+        assert "as a receiver's audio" not in out
+        assert "Decoded 1 APRS message(s)" in out
+
+
+def test_a_file_that_cant_be_read_is_said_plainly(tmp_path, capsys):
+    """files-3: 24-bit samples in 32-bit words whose words fit neither
+    layout (R8-11 reads the others: test_samples_in_32_bit_words_decode)
+    are refused by the WAV reader (they read as noise before); the command
+    says so, as the window does, instead of a traceback."""
+    from tests.wav_builders import encode, fmt_body, write_wav
+
+    path = tmp_path / "s24_le.wav"
+    packed = encode(0.5 * np.sin(np.arange(800) / 3.0), "int", 3)
+    write_wav(path, fmt_body(2, 48000, 4, bits=24), packed)
+    for argv in (["decode", "aprs", "-i", str(path)], ["scan", "--input", str(path)]):
+        assert main(argv) == 1
+        out = capsys.readouterr().out
+        assert "Error: s24_le.wav can't be read: its 24-bit samples are stored" in out
+
+
+def test_samples_in_32_bit_words_decode(tmp_path, capsys):
+    """R8-11: 24-bit samples in 32-bit words (ALSA's arecord's S24_LE, in
+    each word's low three bytes) are read where the data shows them: an
+    APRS packet decodes, as from packed samples (they were refused)."""
+    from tests.wav_builders import fmt_body, full_scale, integers, interleave, write_wav
+
+    x = _place(_aprs("!4903.50N/07201.75W>From S24_LE"), offset=-50e3)
+    ints = np.rint(interleave(0.5 * x) * full_scale(3)).astype(np.int64)
+    path = tmp_path / "aprs_s24_le.wav"
+    write_wav(path, fmt_body(2, int(RATE), 4, bits=24), integers(ints, 4))
+    assert main(["decode", "aprs", "-i", str(path), "--offset", "-50000"]) == 0
+    out = capsys.readouterr().out
+    assert "Decoded 1 APRS message(s)" in out, out
+    assert "From S24_LE" in out
+
+
+def test_a_one_channel_files_rate_is_its_own_read_as_iq_too(tmp_path, capsys):
+    """files-2 on the command line: ``--sample-rate`` of a one-channel WAV
+    file is its own rate, its samples' (twice the I/Q rate it is read at),
+    when it is read as I/Q too (Morse, ``scan --input``), as when its sound
+    is decoded as a receiver's audio (R7L-2) and as Import Options takes
+    it. There it was taken as the I/Q rate: given the file's own 8 kHz,
+    Morse at 700 Hz decoded as noise ("60 WPM IE EEIE ..."), and a file
+    whose header gives no rate was scanned around a center of 0 Hz, its
+    tone at -600 Hz. The command also says where a one-channel file's I/Q
+    is centered: --offset counts from there."""
+    from tests.wav_builders import encode, fmt_body, iq_wav, write_wav
+
+    rate = 8000
+    tone = np.real(enc.cw_baseband("CQ DE N0CALL", rate, 20, offset_hz=700.0))
+    pad = np.zeros(rate // 2)
+    x = 0.5 * np.concatenate([pad, tone, pad])
+    with_rate = tmp_path / "cw.wav"
+    iq_wav(with_rate, x, "int", 2, rate)
+    without = tmp_path / "cw_rate0.wav"
+    write_wav(without, fmt_body(1, 0, 2), encode(x, "int", 2))
+    for path in (with_rate, without):
+        argv = ["decode", "cw", "-i", str(path), "--offset", "-1300"]
+        assert main(argv + ["--sample-rate", "8000"]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out, out
+        assert f"({len(x) / rate:.3f}s at 0.004 Msps)" in out, out
+        assert (
+            "One channel: read as I/Q at half its rate, centered on 2 kHz, "
+            "which --offset counts from." in out
+        ), out
+    assert main(["scan", "--input", str(without), "--sample-rate", "8000"]) == 0
+    out = capsys.readouterr().out
+    assert "Center: 0.0020 MHz" in out, out
+    assert "     0.0007 MHz (    -1.3 kHz)" in out, out
+
+
+def test_an_audio_rate_file_its_sidecar_places_is_read_as_iq(tmp_path, capsys):
+    """R8-13: a one-channel file at an audio rate whose sidecar places it at
+    an IF (10.7 MHz) holds a receiver's IF, not its sound: it is read as
+    I/Q there (--offset counts from 10.7 MHz), as the window's File menu
+    reads it. Its samples were read as a receiver's FM discriminator audio
+    and the FM signal in them gave nothing."""
+    from sdr_module.dsp.recording import write_sidecar
+    from tests.wav_builders import iq_wav
+
+    rate = 48000
+    burst = enc.aprs_baseband(
+        "N0CALL-9", "APZ001", "!4903.50N/07201.75W>From an IF", rate, ["WIDE1-1"]
+    )
+    pad = np.zeros(int(0.3 * rate), np.complex64)
+    s = np.concatenate([pad, burst, pad])
+    carrier = np.exp(2j * np.pi * (rate / 4) * np.arange(len(s)) / rate)
+    path = tmp_path / "if_aprs.wav"
+    offset = iq_wav(path, 0.5 * np.real(s * carrier), "int", 2, rate)
+    write_sidecar(path, SampleFormat.INT16, rate, 10.7e6, header_bytes=offset)
+    assert main(["decode", "aprs", "-i", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "read as a receiver's audio" not in out
+    assert "centered on 10.7 MHz, which --offset counts from" in out, out
+    assert "Decoded 1 APRS message(s)" in out, out
+    assert "From an IF" in out
+
+
+class TestMorseInAnAudioRecording:
+    """R8-12: ``sdr-scan decode cw`` of a one-channel audio recording (a
+    receiver's CW audio: the Morse tone at its pitch) wanted ``--offset``
+    from the I/Q's center, a quarter of the file's rate (``--offset -1300``
+    for a 700 Hz tone in 8 kHz audio), and without it decoded nothing. It
+    now decodes the audio as a receiver's audio like the other audio
+    decoders: at the tone's pitch, found (the strongest tone between 150 Hz
+    and 3 kHz) or given with ``--pitch``. ``--offset`` keeps reading it as
+    I/Q, as before, and is what I/Q files take."""
+
+    def _cw(self, path, rate=8000, pitch=700.0, text="CQ DE N0CALL", noise=0.0):
+        from tests.wav_builders import iq_wav
+
+        tone = np.real(enc.cw_baseband(text, rate, 20, offset_hz=pitch))
+        pad = np.zeros(rate // 2)
+        x = 0.5 * np.concatenate([pad, tone, pad])
+        if noise:
+            x = x + noise * np.random.default_rng(2).standard_normal(len(x))
+        iq_wav(path, x, "int", 2, rate)
+        return path, len(x)
+
+    @pytest.mark.parametrize("rate,pitch", [(8000, 700.0), (48000, 600.0)])
+    def test_the_pitch_is_found(self, tmp_path, capsys, rate, pitch):
+        path, frames = self._cw(tmp_path / "cw.wav", rate, pitch, noise=0.05)
+        assert main(["decode", "cw", "-i", str(path)]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out, out
+        assert f"Loaded {frames} samples" in out
+        assert "one channel), read as a receiver's audio" in out
+        assert f"its Morse tone at {pitch:.0f} Hz (found" in out, out
+
+    def test_the_pitch_given(self, tmp_path, capsys):
+        path, _frames = self._cw(tmp_path / "cw.wav", noise=0.05)
+        assert main(["decode", "cw", "-i", str(path), "--pitch", "700"]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out, out
+        assert "its Morse tone at 700 Hz (given with --pitch)" in out
+        # (A pitch that isn't the tone's: nothing, as in the window.)
+        assert main(["decode", "cw", "-i", str(path), "--pitch", "1500"]) == 0
+        assert "Decoded 0 CW message(s)" in capsys.readouterr().out
+
+    def test_no_tone_is_said(self, tmp_path, capsys):
+        from tests.wav_builders import iq_wav
+
+        path = tmp_path / "hiss.wav"
+        noise = 0.2 * np.random.default_rng(4).standard_normal(16000)
+        iq_wav(path, noise, "int", 2, 8000)
+        assert main(["decode", "cw", "-i", str(path)]) == 1
+        out = capsys.readouterr().out
+        assert "no Morse tone in hiss.wav" in out
+        assert "--pitch" in out
+
+    def test_a_pitch_outside_its_sound_is_said(self, tmp_path, capsys):
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        assert main(["decode", "cw", "-i", str(path), "--pitch", "5000"]) == 1
+        out = capsys.readouterr().out
+        assert "5000 Hz isn't in cw.wav's sound (0 Hz to 4 kHz)" in out
+
+    def test_offset_still_reads_it_as_iq(self, tmp_path, capsys):
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        assert main(["decode", "cw", "-i", str(path), "--offset", "-1300"]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out
+        assert "which --offset counts from" in out
+        assert "read as a receiver's audio" not in out
+
+    def test_pitch_is_for_morse_in_audio(self, tmp_path, capsys):
+        """(Not with --offset, another protocol, or an I/Q recording.)"""
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        iq = _save(tmp_path / "iq.sigmf-data", _place(_aprs("!4903.50N/07201.75W>x")))
+        for argv in (
+            ["decode", "cw", "-i", str(path), "--pitch", "700", "--offset", "0"],
+            ["decode", "aprs", "-i", str(path), "--pitch", "700"],
+            ["decode", "cw", "-i", str(iq), "--pitch", "700"],
+        ):
+            assert main(argv) == 1, argv
+            out = capsys.readouterr().out
+            assert "--pitch is the pitch of a Morse tone" in out, out
+
+    def test_pitch_says_why_a_file_isnt_read_as_audio(self, tmp_path, capsys):
+        """(A file that can't be read, or a one-channel one whose rate is
+        unknown, is said so, as without --pitch: it was "read as I/Q: give
+        --offset", which then said it can't be read, or read the file at
+        an audio rate given with --sample-rate as audio after all.)"""
+        from tests.wav_builders import encode, fmt_body, write_wav
+
+        tone = 0.5 * np.sin(np.arange(8000) / 3.0)
+        broken = tmp_path / "s24_le.wav"
+        write_wav(broken, fmt_body(1, 8000, 4, bits=24), encode(tone, "int", 3))
+        three = tmp_path / "three.wav"
+        write_wav(three, fmt_body(3, 8000, 2), encode(np.tile(tone, 3), "int", 2))
+        unknown = tmp_path / "rate0.wav"
+        write_wav(unknown, fmt_body(1, 0, 2), encode(tone, "int", 2))
+        for path, said in (
+            (broken, "Error: s24_le.wav can't be read: its 24-bit samples are"),
+            (three, "Error: three.wav can't be read: it has 3 channels"),
+            (unknown, "Error: sample rate unknown for this file; specify --sample-"),
+        ):
+            assert main(["decode", "cw", "-i", str(path), "--pitch", "700"]) == 1
+            out = capsys.readouterr().out
+            assert said in out, out
+            assert "give --offset" not in out, out
+        argv = ["decode", "cw", "-i", str(unknown), "--pitch", "700"]
+        assert main(argv + ["--sample-rate", "8000"]) == 0
+        assert "its Morse tone at 700 Hz (given with --pitch)" in (
+            capsys.readouterr().out
+        )
+
+    def test_max_samples_counts_its_own_samples(self, tmp_path, capsys):
+        """(As the other audio decoders count them.)"""
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        argv = ["decode", "cw", "-i", str(path), "--max-samples", "16000"]
+        assert main(argv) == 0
+        assert "Loaded 16000 samples (2.000s at 8 kS/s" in capsys.readouterr().out

@@ -12,13 +12,24 @@ over a few milliseconds where the squelch opens and closes, as the speaker
 does. The WAV header is kept up to date as it records, so even a recording
 cut short (a crash) plays.
 
+While a recording plays at another speed (the playback strip's 0.5x, 2x
+or 4x), the take still gets the recording's own audio at its own pace: 10
+s of the recording make 10 s of WAV, whatever the speed chosen or how
+fast this computer manages to play it. What was received is recorded as
+it was; the speaker's sound, time-stretched to the speed
+(``playback_sound.py``), isn't.
+
 Files are named after what was tuned: ``<freq>_<mode>_<date>_<time>.wav``
-(:func:`audio_file_name`), e.g. ``145.800MHz_FM_20261030_142233.wav``.
+(:func:`audio_file_name`), e.g. ``145.800MHz_FM_20261030_142233.wav``; an
+audio recording's sound (a one-channel file of audio, listened to from
+1 Hz) after the recording: ``scanner_audio_USB_20261030_142233.wav``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import time
 from typing import Optional
 
@@ -32,11 +43,35 @@ logger = logging.getLogger(__name__)
 AUDIO_RATE = 48000
 
 
-def audio_file_name(freq_hz: float, mode: str, when: Optional[float] = None) -> str:
-    """``145.800MHz_FM_20261030_142233.wav`` (local time)."""
+def audio_file_name(
+    freq_hz: float, mode: str, when: Optional[float] = None, source: str = ""
+) -> str:
+    """``145.800MHz_FM_20261030_142233.wav`` (local time). ``source``: an
+    audio recording playing, after whose name its sound is named
+    (``scanner_audio_USB_20261030_142233.wav``): the frequency it is
+    listened from, 1 Hz, says nothing ("0.000MHz"). That name is cut to
+    60 characters and 180 bytes on disk (a file name holds 255; emoji take
+    four bytes each), then loses the spaces of any kind, dots and
+    underscores at either end (a cut left a space before "_USB_", and a
+    recording named ".wav" a hidden file); with nothing left, the
+    frequency it is."""
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(when))
     mode = "".join(ch for ch in str(mode) if ch.isalnum()) or "audio"
-    return f"{float(freq_hz) / 1e6:.3f}MHz_{mode}_{stamp}.wav"
+    name = os.path.basename(str(source))
+    # (Without its extension: ".wav" is one, not a name to keep.)
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    what = _trimmed(stem[:60])
+    while len(os.fsencode(what)) > 180:
+        what = _trimmed(what[:-1])
+    if not what:
+        what = f"{float(freq_hz) / 1e6:.3f}MHz"
+    return f"{what}_{mode}_{stamp}.wav"
+
+
+def _trimmed(text: str) -> str:
+    """``text`` without the spaces (of any kind), dots and underscores at
+    either end."""
+    return re.sub(r"^[\s._]+|[\s._]+$", "", text)
 
 
 class AudioTake:

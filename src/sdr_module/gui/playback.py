@@ -79,10 +79,13 @@ def format_clock(seconds: float, total: float = 0.0) -> str:
 
 def playing_line(options: IqFileOptions) -> str:
     """What the status bar says of a recording opened: ``"Playing
-    fm8.sigmf-data (99.6–100.6 MHz)"``."""
+    fm8.sigmf-data (99.6–100.6 MHz)"``; a one-channel WAV file (a real
+    signal, read as I/Q) says so: ``"Playing audio.wav (one channel,
+    0–0.024 MHz)"``."""
     half = options.sample_rate / 2.0
     span = format_mhz_range(options.center_hz - half, options.center_hz + half)
-    return f"Playing {options.name} ({span})"
+    held = "one channel, " if options.real_signal else ""
+    return f"Playing {options.name} ({held}{span})"
 
 
 class FilePlaybackDevice:
@@ -119,6 +122,9 @@ class FilePlaybackDevice:
         self.info = self.Info(f"Playback: {options.name}")
         self._running = False
         self._finished = False
+        # What the read that found the end of the file (Loop off) asked for
+        # beyond it: the next read brings it once Loop is on (see play_on).
+        self._short = 0
         #: Start again at the end of the file.
         self.loop = False
         #: Playback speed (the window reads this much faster than real time).
@@ -129,10 +135,21 @@ class FilePlaybackDevice:
         self.error: Optional[str] = None
         #: Samples that weren't numbers were replaced by zeros.
         self.bad_samples = 0
-        self._float_data = self._player.sample_format in (
-            SampleFormat.FLOAT32,
-            SampleFormat.FLOAT64,
-        )
+        wav = self._player.wav_header
+        if wav is not None:
+            # (A WAV file's 24- and 32-bit integers are read as cf32, but
+            # they are always numbers.)
+            self._float_data = wav.sample_type == "float"
+        else:
+            self._float_data = self._player.sample_format in (
+                SampleFormat.FLOAT32,
+                SampleFormat.FLOAT64,
+            )
+        #: How much of the span (around its middle) the window tunes (see
+        #: its _channel_fits): all of a one-channel file's, whose I/Q holds
+        #: its own frequencies, 0 Hz to half its rate, with no receiver's
+        #: roll-off at the edges (dsp.real_iq); None: a receiver's inner part.
+        self.usable_fraction: Optional[float] = 1.0 if options.real_signal else None
 
     # -- the MockDevice / driver API ------------------------------------------
 
@@ -191,6 +208,9 @@ class FilePlaybackDevice:
         if not self._running:
             return None
         n = int(num_samples)
+        if self.loop and self._short:
+            # (Loop turned on after the end was read: see play_on.)
+            n, self._short = max(n, 0) + self._short, 0
         if n <= 0 or self._total <= 0:
             return np.zeros(0, dtype=np.complex64)
         try:
@@ -212,6 +232,7 @@ class FilePlaybackDevice:
             return None
         if not self.loop and self._player.position >= self._total:
             self._finished = True
+            self._short = max(0, n - len(out))
         if self._float_data and len(out):
             finite = np.isfinite(out)
             if not finite.all():
@@ -235,6 +256,12 @@ class FilePlaybackDevice:
         return self._finished
 
     @property
+    def short_by(self) -> int:
+        """Samples the read that found the end of the file asked for
+        beyond it, still owed (see :meth:`play_on`); 0 when none are."""
+        return self._short
+
+    @property
     def total_samples(self) -> int:
         return self._total
 
@@ -255,6 +282,17 @@ class FilePlaybackDevice:
         """Go to ``sample`` (clamped to the file)."""
         sample = min(max(0, int(sample)), self._total)
         self._player.seek(sample)
+        self._finished = False
+        self._short = 0
+
+    def play_on(self) -> None:
+        """Loop turned on after the end of the file was read (its sound
+        still playing): reading goes on from the start, and the next read
+        also brings what the one that found the end asked for beyond it,
+        from the start, as Loop on all along would have. (The window
+        counted that read whole and asks for the next only when it is
+        due: the start came after a gap as long as the last read fell
+        short, up to half a second of 8 kHz audio.)"""
         self._finished = False
 
     def seek_seconds(self, seconds: float) -> None:
@@ -278,6 +316,22 @@ class _PreviousSource:
     #: The decoder a preset had turned on there (the window's
     #: _preset_decoder), which opening the recording may turn off.
     preset_decoder: Any = None
+
+
+def speed_note(speed: float) -> str:
+    """What the status bar says when another playback speed is chosen
+    (M-P1: the sound plays at every speed, time-stretched with its pitch
+    kept): ``"Playing at 2x: the sound keeps its pitch."``. At 4x speech
+    is hard to follow, and it says so; at 1x, ``"Playing at 1x."``."""
+    speed = float(speed)
+    if speed == 1.0:
+        return "Playing at 1x."
+    if speed > 2.0:
+        return (
+            f"Playing at {speed:g}x: the sound keeps its pitch, but speech is "
+            "hard to follow this fast (2x or slower to listen)."
+        )
+    return f"Playing at {speed:g}x: the sound keeps its pitch."
 
 
 if HAS_PYQT6:
@@ -432,8 +486,11 @@ if HAS_PYQT6:
                 self._speed.addItem(f"{speed:g}x", speed)
             self._speed.setCurrentIndex(SPEEDS.index(1.0))
             self._speed.setToolTip(
-                "Playback speed. Audio plays at 1x only; the spectrum, "
-                "waterfall, decoders and recordings work at any speed."
+                "Playback speed. The sound plays at every speed and keeps its "
+                "pitch; at 4x speech is hard to follow, so use it to find "
+                "where something is said. On a computer that can't keep up "
+                "the recording plays more slowly, and the sound follows. "
+                "Record Audio keeps the recording's own pace."
             )
             self._speed.currentIndexChanged.connect(
                 lambda _i: self.speed_changed.emit(float(self._speed.currentData()))
@@ -614,7 +671,8 @@ if HAS_PYQT6:
             self._device: Optional[FilePlaybackDevice] = None
             self._previous: Optional[_PreviousSource] = None
             self._device_tip = ""
-            #: The last open() changed the listening by the band plan (its
+            #: The last open() changed the listening by the band plan, or
+            #: to hear a one-channel file's audio at its own pitch (its
             #: status line is the one to keep).
             self.band_plan_applied = False
             # Where the file was (monotonic time, sample, loops) when the
@@ -722,6 +780,8 @@ if HAS_PYQT6:
                     tuned_before, win._current_frequency(), lead=playing_line(options)
                 )
             )
+            if not self.band_plan_applied and options.audio:
+                self.band_plan_applied = self._hear_as_recorded(options)
             win._reset_demodulator()
             self._bar.show_file(options, self.back_to_text())
             self._bar.setVisible(True)
@@ -730,6 +790,41 @@ if HAS_PYQT6:
             self._timer.start()
             self._tick()
             logger.info(f"Playing back {options.path}")
+            return True
+
+        def _hear_as_recorded(self, options: IqFileOptions) -> bool:
+            """Audio in a one-channel file (0 Hz to half its rate, its sound
+            itself) heard at its own pitch: in USB from 0 Hz, whose filter
+            passes it from 200 Hz up (2.7 kHz: to 2.9 kHz; the widest, 3.6
+            kHz, to 3.8 kHz; audio slower than about 16 kHz to under a
+            quarter of its rate, all its I/Q holds: _filter_width), as
+            Radio > Choose Mode From Band Plan hears a band its usual way
+            (not when that is off). Not all of it: what lies above the
+            filter isn't heard, which the status line says (it claimed the
+            file "plays as recorded"). True when the line says so."""
+            win = self._win
+            action = win._own("_band_plan_action")
+            if action is not None and not action.isChecked():
+                return False
+            win._quiet_mode_change = True  # (the line below says how)
+            try:
+                win._set_demod_mode("USB", None, None)
+            finally:
+                win._quiet_mode_change = False
+            # (Its lowest frequency the window tunes: just above 0 Hz.)
+            lowest, _top = win._control_panel._freq_input.tuning_range()
+            if not win.set_frequency(lowest):
+                return False
+            width = win._control_panel._bw_combo.currentText()
+            # (The passband heard: 200 Hz up to 200 Hz plus the filter.)
+            tuned = win._current_frequency()
+            low, high = (tuned + edge for edge in win._passband_edges())
+            text = win._keeping_release_note(
+                f"Audio: listening in USB from 0 Hz with a {width} filter, so its "
+                f"sound from {low / 1e3:.1f}–{high / 1e3:.1f} kHz plays at its own "
+                "pitch (Radio > Choose Mode From Band Plan)"
+            )
+            win._show_status_message(f"{playing_line(options)} · {text}", "info", 8000)
             return True
 
         def close(
@@ -858,8 +953,14 @@ if HAS_PYQT6:
             self._bar.set_playing(self._win._is_running, device.finished)
 
         def _on_loop_changed(self, on: bool) -> None:
-            if self._device is not None:
-                self._device.loop = bool(on)
+            device = self._device
+            if device is not None:
+                device.loop = bool(on)
+                if on and device.finished and self._win._is_running:
+                    # Its end was read, its sound still plays (see _tick):
+                    # it plays on from the start, as Loop does, instead of
+                    # stopping at the next tick.
+                    device.play_on()
 
         def set_speed(self, speed: float) -> None:
             device = self.device
@@ -874,19 +975,20 @@ if HAS_PYQT6:
             self._speed_mark = None
             self._slow_said = False
             if speed != 1.0:
-                # The paused audio's own hint, said here (with the audio off
-                # too) and so not again when the audio pauses: one message.
-                win._realtime_hint_shown = True
-                win._realtime_hint_text = win._realtime_hint()
-                win._show_status_message(win._realtime_hint_text, "info", 6000)
+                # How it sounds now (M-P1: at every speed, its pitch kept),
+                # said once, with the speaker off too.
+                win._show_status_message(speed_note(speed), "info", 6000)
             elif win._message_label.text().startswith("Playing at "):
                 # (The note on another speed no longer applies. Any other
                 # message stays: a file opened after one played at 2x goes
                 # back to 1x under the line that says how it is heard.)
-                win._show_status_message("Playing at 1x.", "info", 2500)
+                win._show_status_message(speed_note(1.0), "info", 2500)
 
         def _tick(self) -> None:
-            """Follow the playing position; pause at the end of the file."""
+            """Follow the playing position; pause at the end of the file,
+            once its sound has played (what the sound still holds when the
+            end is read is given out as the speaker plays it, at the speed
+            chosen: see the window's ``_between_blocks``)."""
             device = self.device
             if device is None:
                 self._timer.stop()
@@ -897,7 +999,7 @@ if HAS_PYQT6:
                 # (Logged by the device: one Error History entry.)
                 win._show_status_error(f"Playback stopped: {device.error}.", log=False)
                 device.error = None
-            elif device.finished and win._is_running:
+            elif device.finished and win._is_running and not win._playback_sound.rest_s:
                 win._stop_acquisition()
                 win._show_status_message(
                     f"End of {device.options.name}. Press Play (Space) to play "

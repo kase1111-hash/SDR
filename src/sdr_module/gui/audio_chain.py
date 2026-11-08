@@ -22,7 +22,10 @@ tested without a window and costs little at 30 frames a second:
   :func:`make_noise_reduction` the Light and Strong noise reduction.
 * :class:`AudioJoin`: short fades so the audio never steps (squelch opening
   or closing, a new receiver chain after a Bandwidth or Mode change).
-* :class:`ToneSquelch`: CTCSS or DCS tone squelch on FM audio.
+* :class:`ToneSquelch`: CTCSS or DCS tone squelch on FM audio (or reversed:
+  muted while the tone or code is heard).
+* :class:`ClipWarning`: when to warn that FM audio clips (the deviation
+  set is smaller than the station's), and what to say, for both receivers.
 * :class:`IqConditioner`: optional DC-spike removal and I/Q balance
   correction of the raw samples.
 """
@@ -30,7 +33,9 @@ tested without a window and costs little at 30 frames a second:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Tuple
+import time
+from collections import deque
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -43,6 +48,7 @@ from ..dsp.filters import (
     NoiseReductionMethod,
     ctcss_label,
 )
+from ..dsp.fm_stereo import DEEMPHASIS_S
 from ..utils.iq import estimate_iq_imbalance
 
 #: Level reported for an empty block (dBFS).
@@ -253,6 +259,14 @@ class SquelchGate:
         """The threshold the last :meth:`update` used."""
         return self._last_threshold
 
+    @property
+    def hanging(self) -> bool:
+        """Whether it is open only for its hang time: the level has fallen
+        more than ``hysteresis_db`` below the threshold (the carrier dropped,
+        or faded away), and it closes unless the level comes back within
+        ``hang_s``. What it lets through meanwhile is noise, or a fade."""
+        return self.is_open and self._below_s > 0.0
+
     def update(self, level_db: float, noise_db: Optional[float], seconds: float) -> str:
         """Decide for one block of ``seconds`` at ``level_db``."""
         threshold = self.threshold_db(noise_db)
@@ -368,9 +382,10 @@ NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
     (
         "auto",
         "Auto",
-        "Finds the strongest steady whistle (a heterodyne) and removes it, "
-        "following it as it drifts; voice is left alone. Not for music (use "
-        "Off): a note held for half a second counts as a whistle",
+        "Finds steady whistles (heterodynes) and removes up to three at once, "
+        "the strongest first, following each as it drifts; voice is left "
+        "alone. Not for music (use Off): a note held for half a second counts "
+        "as a whistle",
     ),
     ("manual", "Manual", "Removes the frequency set in the box next to it"),
 )
@@ -389,6 +404,26 @@ LOW_CUT_CHOICES: Tuple[Tuple[str, str, str], ...] = (
 #: (67-254 Hz) or the DCS bits under the voice are filtered out, as a
 #: radio does.
 SUBAUDIBLE_CUT_HZ = 300.0
+#: What the reverse tone squelch does (see :class:`ToneSquelch`), for the
+#: controls that set it.
+REVERSE_TONE_TIP = (
+    "Reverse tone squelch (CHIRP's TSQL-R and DTCS-R): mute the stations "
+    "that send this CTCSS tone or DCS code and hear every other one, to "
+    "leave out one station or a repeater on a channel you listen to. Each "
+    "transmission is held about half a second while its tone or code is "
+    "looked for."
+)
+
+#: Radio > Audio > Squelch Tail Elimination (radios' STE), for
+#: :attr:`ToneSquelch.tail_elimination`: what it does and why one might
+#: turn it off.
+TAIL_ELIMINATION_TIP = (
+    "Close the CTCSS tone squelch at the reverse burst a radio sends as its "
+    "user stops talking, before the squelch tail (the noise as the carrier "
+    "drops) is heard. Turn it off if a station is cut off for a moment "
+    "mid-transmission: a voice pitched near its tone can sound like a burst. "
+    "(A DCS code's turn-off code always closes it.)"
+)
 
 
 class AudioOptions:
@@ -409,6 +444,13 @@ class AudioOptions:
       is heard without its sub-audible band (the tone or the DCS bits).
     * ``low_cut_hz``: the low cut chosen (Hz, 0 for none), for AM, SSB and
       narrow FM.
+    * ``deemphasis_s``: broadcast FM's de-emphasis time constant, 75 us
+      (the Americas, South Korea) or 50 us (Europe, Australia, most of the
+      world); see ``gui/deemphasis.py``. Mono and stereo alike; other
+      modes have none.
+    * ``stereo_blend``: how far a weak broadcast FM station blends toward
+      mono: ``"less"``, ``"normal"`` or ``"more"`` (see
+      ``dsp/fm_stereo.py``'s ``BLEND_OFFSETS_DB``).
     """
 
     def __init__(self) -> None:
@@ -419,6 +461,8 @@ class AudioOptions:
         self.notch_hz: float = float(DEFAULT_NOTCH_HZ)
         self.tone_squelch: bool = False
         self.low_cut_hz: float = 0.0
+        self.deemphasis_s: float = DEEMPHASIS_S
+        self.stereo_blend: str = "normal"
 
 
 class ListeningFilters:
@@ -434,7 +478,8 @@ class ListeningFilters:
     signal, never a whistle to remove).
 
     :attr:`notch_frequency_hz` is the frequency being notched (Manual's,
-    or the whistle Auto found), None when nothing is.
+    or the strongest whistle Auto found), None when nothing is;
+    :attr:`notch_frequencies_hz` every one (Auto removes up to three).
 
     The low cut (``low_cut_hz`` of :meth:`process`, None for none) is a
     high-pass after the notch (see :class:`~sdr_module.dsp.audio_filters.
@@ -492,6 +537,15 @@ class ListeningFilters:
         if notch.mode == "off":
             return None
         return notch.frequency_hz
+
+    @property
+    def notch_frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency being notched (Manual's, or each whistle Auto
+        removes, the strongest first); empty when nothing is."""
+        notch = self._notch
+        if notch.mode == "off":
+            return ()
+        return tuple(notch.frequencies_hz)
 
     def process(
         self,
@@ -781,14 +835,54 @@ class ToneSquelch:
 
     The DCS detector needs the discriminator's audio before any DC
     blocking (:meth:`feed_dcs`, each block before :meth:`process`).
+
+    A transmission that ends with a DCS turn-off code or a CTCSS reverse
+    burst closes it within 100 ms of either (M-Q1, M-Q2), before the
+    carrier drops: its squelch tail isn't heard.
+
+    ``tail_elimination`` (True by default, settable while it runs: Radio >
+    Audio > Squelch Tail Elimination) switches the CTCSS reverse burst on
+    or off, as radios' STE menus do: a voice pitched near the tone, sent
+    with little filtering, can sound like a burst now and then and mute
+    the station for about 0.8 s. The DCS turn-off code isn't covered: it
+    is part of the DCS standard and no voice was heard to fake it.
+
+    ``reverse`` (False by default) reverses it, as CHIRP's TSQL-R and
+    DTCS-R and the radios that have them do: muted while the tone or code
+    is heard, open for every other station. It opens only once it is sure
+    the tone or code isn't there (:data:`REVERSE_DECIDE_S` of audio since
+    :meth:`reset`, or since a DCS turn-off code or a reverse burst: the
+    detectors find one in 0.35-0.5 s), so the station it mutes isn't heard
+    as each of its transmissions starts (or ends) either. And it opens only
+    on a carrier that is really there (:meth:`process`'s ``carrier``): the
+    station it mutes, heard for less than half a second before its carrier
+    dropped, wasn't recognised yet, and the noise the squelch's hang time
+    lets through after it is no station without the tone.
     """
 
-    def __init__(self, rate: float):
+    #: Audio the reverse tone squelch hears before it opens (s): the CTCSS
+    #: detector decides from 0.5 s, and a DCS code is read from 0.35 s
+    #: (0.5 s at 6 dB signal to noise in its band).
+    REVERSE_DECIDE_S = 0.55
+
+    def __init__(self, rate: float, tail_elimination: bool = True):
         self.rate = float(rate)
         self.tone_hz: Optional[float] = None
         self.dcs: Optional[Tuple[int, bool]] = None
-        self._detector = CTCSSDetector(self.rate)
+        #: Reverse: muted while the tone or code is heard (see above).
+        self.reverse: bool = False
+        self._detector = CTCSSDetector(self.rate, reverse_burst=bool(tail_elimination))
         self._dcs_detector = DcsDetector(self.rate)
+        self._open = False  # (what the last block's process() answered)
+
+    @property
+    def tail_elimination(self) -> bool:
+        """Whether a CTCSS station's reverse burst closes it (see above)."""
+        return self._detector.reverse_burst
+
+    @tail_elimination.setter
+    def tail_elimination(self, on: bool) -> None:
+        self._detector.reverse_burst = bool(on)
 
     @property
     def active(self) -> bool:
@@ -798,6 +892,7 @@ class ToneSquelch:
     def reset(self) -> None:
         self._detector.reset()
         self._dcs_detector.reset()
+        self._open = False
 
     @property
     def detected_hz(self) -> Optional[float]:
@@ -823,14 +918,139 @@ class ToneSquelch:
         """The discriminator's audio before DC blocking (for DCS)."""
         self._dcs_detector.process(audio)
 
-    def process(self, audio: np.ndarray) -> bool:
-        """Feed FM audio; True while the speaker may play."""
+    def process(self, audio: np.ndarray, carrier: bool = True) -> bool:
+        """Feed FM audio; True while the speaker may play.
+
+        ``carrier``: whether a signal is really there in this block (the
+        squelch's view: False while it is open only for its hang time, see
+        :attr:`SquelchGate.hanging`). Reversed, it doesn't open on such a
+        block (the noise after a carrier dropped is no station without the
+        tone), but a station it plays plays on through it, a fade or its
+        squelch tail, as with no tone squelch. Not reversed, it isn't used.
+        """
         self._detector.process(audio)
         if self.dcs is not None:
-            return self._dcs_detector.is_present(*self.dcs)
-        if self.tone_hz is None:
+            heard = self._dcs_detector.is_present(*self.dcs)
+            listened = self._dcs_detector.heard_s
+        elif self.tone_hz is None:
+            self._open = True
             return True
-        return self._detector.is_present(self.tone_hz)
+        else:
+            heard = self._detector.is_present(self.tone_hz)
+            listened = self._detector.heard_s
+        if not self.reverse:
+            self._open = heard
+            return heard
+        sure = not heard and listened >= self.REVERSE_DECIDE_S
+        self._open = sure and (bool(carrier) or self._open)
+        return self._open
+
+
+# FM audio clipping warning: more than this fraction of the samples beyond
+# full scale (the station deviates more than the deviation set) on a clear
+# signal, for this long, said at most this often.
+CLIP_FRACTION = 0.05
+CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
+CLIP_WARN_AFTER_S = 0.5
+CLIP_WARN_EVERY_S = 30.0
+
+
+class ClipWarning:
+    """When to warn that FM audio clips, and what to say: the rule both
+    receivers use (the main window's ``_check_fm_clipping``, the Second
+    Receiver's DSP worker), so their thresholds and texts can't drift.
+
+    Feed it every demodulated FM block (:meth:`update`, with the receiver
+    chain's ``last_clip_fraction`` and ``clip_swing()``): only a clear
+    signal counts (:data:`CLIP_MIN_SNR_DB` above the noise: a squelch tail
+    or an empty channel clips whatever the setting); more than
+    :data:`CLIP_FRACTION` of its audio beyond full scale for
+    :data:`CLIP_WARN_AFTER_S` makes the warning due, at most every
+    :data:`CLIP_WARN_EVERY_S`. :meth:`text` names the deviation that holds
+    the swing measured while it clipped. A block that doesn't clip costs a
+    comparison (the swing is measured only while it clips).
+    """
+
+    def __init__(self) -> None:
+        #: Seconds of clipping lately (each block that doesn't clip takes
+        #: its length off).
+        self.seconds = 0.0
+        #: No warning before this time (``time.monotonic()``).
+        self.due = 0.0
+        #: How far the audio swung, (peak, often) in Hz, in the blocks that
+        #: clipped lately.
+        self.swings: Deque[Tuple[float, float]] = deque(maxlen=60)
+
+    def reset(self) -> None:
+        """Demodulation stopped (or the stream broke off): what clips next
+        starts afresh."""
+        self.seconds = 0.0
+
+    def update(
+        self,
+        chain: Any,
+        deviation_hz: float,
+        seconds: float,
+        snr_db: Optional[float],
+        now: Optional[float] = None,
+    ) -> bool:
+        """Take one FM block of ``seconds`` heard at ``deviation_hz`` (Hz),
+        ``snr_db`` above the noise (None: not known). True when the warning
+        is due now (:meth:`text` says it)."""
+        clear = snr_db is not None and snr_db >= CLIP_MIN_SNR_DB
+        if not (clear and chain.last_clip_fraction > CLIP_FRACTION):
+            self.seconds = max(0.0, self.seconds - seconds)
+            return False
+        if self.seconds <= 0.0:
+            self.swings.clear()  # (a new episode)
+        self.seconds += seconds
+        # (In Hz: the deviation may be changed while it clips.)
+        deviation = float(deviation_hz)
+        peak, often = chain.clip_swing()
+        self.swings.append((peak * deviation, often * deviation))
+        now = time.monotonic() if now is None else float(now)
+        if self.seconds < CLIP_WARN_AFTER_S or now < self.due:
+            return False
+        self.due = now + CLIP_WARN_EVERY_S
+        self.seconds = 0.0
+        return True
+
+    def holding(self, deviation_hz: float) -> str:
+        """The FM deviation choice that holds the swing measured while the
+        audio clipped at ``deviation_hz`` (the rule Identify suggests one
+        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
+        kHz), at least the next larger choice; "" when none is larger."""
+        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
+
+        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
+        if not larger:
+            return ""
+        swings = np.asarray(self.swings, dtype=float).reshape(-1, 2)
+        if not len(swings):
+            return larger[0]
+        peak, often = np.median(swings, axis=0)
+        holds = _deviation_for(float(peak), float(often))
+        return holds if holds in larger else larger[0]
+
+    def text(
+        self, deviation_hz: float, where: str = "Demodulation", current: str = ""
+    ) -> str:
+        """The warning for audio clipping at ``deviation_hz``: ``current``
+        is how that choice reads ("5 kHz"; made from ``deviation_hz`` when
+        empty) and ``where`` the group of the window it is chosen in."""
+        current = current or f"{float(deviation_hz) / 1e3:g} kHz"
+        text = f"FM audio is clipping: this station deviates more than {current}"
+        holds = self.holding(deviation_hz)
+        if holds == "75 kHz":
+            text += (
+                f". Choose a larger FM deviation in {where}, such as 75 kHz "
+                "(broadcast) for an FM radio station."
+            )
+        elif holds:
+            text += f". Choose a larger FM deviation in {where}: {holds} holds it."
+        else:
+            text += ", the largest FM deviation offered."
+        return text
 
 
 class IqConditioner:

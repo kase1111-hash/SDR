@@ -391,6 +391,23 @@ class IqFileOptions:
         return self.real_signal and 0 < 2 * self.sample_rate <= AUDIO_RATE_MAX
 
     @property
+    def frame_rate(self) -> float:
+        """The file's own sample rate: a one-channel file's is twice the
+        I/Q's (:attr:`sample_rate`)."""
+        return 2.0 * self.sample_rate if self.real_signal else self.sample_rate
+
+    def decodes_as_audio(self, protocol: str) -> bool:
+        """Whether File > Decode Recording reads this file as a receiver's
+        audio for ``protocol``: audio (:attr:`audio`) and a protocol sent
+        as a receiver's audio (APRS, POCSAG and FLEX after its FM
+        discriminator, ACARS after its AM detector). Its own samples then
+        go to the decoder at :attr:`frame_rate`; Morse tones decode from
+        the I/Q at their pitch."""
+        from ..dsp.live_decoders import audio_input
+
+        return self.audio and bool(audio_input(protocol))
+
+    @property
     def format_label(self) -> str:
         """How the samples are stored, as the window names it: ``"cu8"``,
         or a WAV file's own format, ``"24-bit integer WAV"``, ``"16-bit
@@ -1197,12 +1214,13 @@ if HAS_PYQT6:
                 )
             layout.addLayout(form)
             if options.audio:
-                # (Audio, probably: what decodes in it, and what doesn't.)
+                # (Audio, probably: how each protocol decodes in it.)
                 span += (
-                    " It has one channel (a real signal), read as the radio "
-                    "signal it holds: Morse tones decode with CW (Morse) at "
-                    "their pitch, but a receiver's audio (APRS tones, pager "
-                    "audio) isn't decoded as audio."
+                    " It has one channel (a real signal): AX.25/APRS, POCSAG, "
+                    "FLEX and ACARS decode its sound as a receiver's audio "
+                    "(pager audio as the FM discriminator gives it, not a "
+                    "speaker's), and Morse tones decode with CW (Morse) at "
+                    "their pitch."
                 )
             self._span_text = span
             self._note = QLabel(span)
@@ -1215,6 +1233,9 @@ if HAS_PYQT6:
             if self._has_center:
                 self._freq.textEdited.connect(self._on_freq_typed)
                 self._protocol.currentTextChanged.connect(self._on_protocol_changed)
+            self._freq_tip = self._freq.toolTip()
+            self._protocol.currentTextChanged.connect(self._sync_as_audio)
+            self._sync_as_audio(self._protocol.currentText())
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
             ok = QPushButton("&Decode")
             set_role(ok, "primary")
@@ -1253,13 +1274,24 @@ if HAS_PYQT6:
             model = self._protocol.model()
             for index, name in enumerate(protocols):
                 cls = live_decoder_class(name)
-                low = float(getattr(cls, "MIN_SAMPLE_RATE", 0.0) or 0.0)
-                if not 0 < rate < low:
-                    continue
-                why = (
-                    f"{name} needs at least {format_rate(low)}; this recording "
-                    f"is {format_rate(rate)}"
-                )
+                if self._options.decodes_as_audio(name):
+                    # (Its sound, at the file's own rate.)
+                    low = float(getattr(cls, "MIN_AUDIO_RATE", 0.0) or 0.0)
+                    have = self._options.frame_rate
+                    if not 0 < have < low:
+                        continue
+                    why = (
+                        f"{name} needs audio at {format_rate(low)} or more; this "
+                        f"recording is {format_rate(have)}"
+                    )
+                else:
+                    low = float(getattr(cls, "MIN_SAMPLE_RATE", 0.0) or 0.0)
+                    if not 0 < rate < low:
+                        continue
+                    why = (
+                        f"{name} needs at least {format_rate(low)}; this recording "
+                        f"is {format_rate(rate)}"
+                    )
                 marked[name] = why
                 item = model.item(index) if hasattr(model, "item") else None
                 if item is not None:
@@ -1267,11 +1299,29 @@ if HAS_PYQT6:
                 self._protocol.setItemData(index, why, Qt.ItemDataRole.ToolTipRole)
             return marked
 
+        def _sync_as_audio(self, protocol: str) -> None:
+            """A protocol decoded from the file's sound (an audio
+            recording's, as a receiver's audio) has no frequency to ask."""
+            audio = self._options.decodes_as_audio(protocol)
+            self._freq.setEnabled(not audio)
+            self._freq.setToolTip(
+                f"{protocol} decodes this file's sound as a receiver's audio: "
+                "there is no frequency to choose."
+                if audio
+                else self._freq_tip
+            )
+
         def _on_accept(self) -> None:
-            why = self._too_slow.get(self._protocol.currentText())
+            protocol = self._protocol.currentText()
+            why = self._too_slow.get(protocol)
             if why:  # (every protocol is: nothing to choose instead)
                 self._note.setText(f"{why}.")
                 set_tone(self._note, "danger")
+                return
+            if self._options.decodes_as_audio(protocol):
+                # (Its sound, whatever the Frequency box holds.)
+                self._result = (protocol, 0.0)
+                self.accept()
                 return
             offset = self.offset()
             if offset is None:

@@ -5946,7 +5946,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         blocks and picks out its own channel at the VFO, so it works
         whatever the Mode and Bandwidth are.
         """
-        from ..dsp.live_decoders import create_live_decoder, live_decoder_class
+        from ..dsp.live_decoders import (
+            LiveDecoderStatus,
+            audio_input,
+            create_live_decoder,
+            live_decoder_class,
+        )
         from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
@@ -5987,6 +5992,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._decoder_panel.set_decoder_status(None)
             self._update_decoder_chip()  # (no decoder runs: no chip)
             return
+        options = getattr(getattr(playback, "device", None), "options", None)
+        if (
+            self._decoder_recording
+            and getattr(options, "audio", False)
+            and audio_input(text)
+        ):
+            # An audio recording plays as its sound turned into I/Q (0 Hz to
+            # half its rate), with no receiver's FM or AM signal in it for
+            # the decoder to demodulate: it decoded nothing (or blamed a rate
+            # too low for I/Q). Decode Recording reads it as a receiver's
+            # audio. (CW decodes its tones as they play.)
+            self._decoder = None
+            self._decoder_protocol = None
+            status = LiveDecoderStatus(
+                name=text,
+                problem=f"{text} isn't decoded from an audio recording as it plays",
+                remedy="File > Decode Recording decodes its sound as a receiver's "
+                "audio.",
+            )
+            self._decoder_panel.set_decoder_status(status)
+            self._update_decoder_chip()  # (no decoder runs: no chip)
+            if self._decoder_panel.is_decoding():
+                self._show_status_message(
+                    f"{status.problem}. {status.remedy}", "warning", 10000, log=False
+                )
+            return
         try:
             self._decoder = create_live_decoder(
                 text,
@@ -5996,8 +6027,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             self._decoder_protocol = ProtocolType(proto_value)
         except Exception as exc:
-            from ..dsp.live_decoders import LiveDecoderStatus
-
             self._decoder = None
             self._decoder_protocol = None
             problem = f"The {text} decoder could not start: {exc}"
@@ -9266,6 +9295,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         paced = bool(getattr(self._device, "paced", False))
         samples = self._read_block()
         if samples is None or len(samples) == 0:
+            if paced:
+                self._between_blocks()
             self._stream_died()
             return
         # A recording's read waits for the disk: no measure of what this
@@ -10162,6 +10193,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._playback.active or sound.stretching:
             audio = sound.play(audio, time.monotonic(), last=last)
         self._audio.write(audio)
+
+    def _between_blocks(self) -> None:
+        """A display frame that read nothing of a playing recording: one
+        slower than a display block a frame (a one-channel file of 8 kHz
+        audio is 4 kS/s of I/Q, a block every half second at 1x, every
+        second at 0.5x). The pace its sound follows counts the frame, and
+        at another speed the speaker gets what the time-stretch holds for
+        it (M-P1 with M-F2: given out only with each block, a quarter of a
+        second at most, the sound of such a file ran dry most of the time
+        at 0.5x). A sound nobody hears any more (the speaker off, the
+        Second Receiver's Listen) ends here, as the next block would end
+        it: what the stretch holds, faded out, and nothing after it (with
+        that block, up to a second later at 0.5x, it came back for a
+        moment after it had stopped)."""
+        if not self._playback.active:
+            return
+        sound = self._playback_sound
+        now = time.monotonic()
+        sound.note(0.0, now, self._playback.speed)
+        join = self._audio_join
+        if not join.playing:
+            return
+        second = getattr(self, "_second_rx", None)
+        if not self._audio_enabled or (second is not None and second.mutes_main()):
+            if sound.stretching:
+                self._speak(np.zeros(0, dtype=np.float32), last=True)
+                join.stop()
+            return
+        audio = sound.more(now)
+        if len(audio):
+            self._audio.write(audio)
 
     def _set_stereo_enabled(self, on: bool) -> None:
         """Radio > Audio > Stereo (K-S1): broadcast FM in stereo where the
@@ -11535,7 +11597,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         background thread, much faster than real time, with progress and
         Cancel. Each message goes to the Decoder tab as it is found, noted
         with the file and where in it."""
-        from ..dsp.live_decoders import LIVE_DECODERS
+        from ..dsp.live_decoders import LIVE_DECODERS, audio_input
 
         protocols = list(LIVE_DECODERS)
         path = path or self._choose_recording("Decode Recording")
@@ -11577,16 +11639,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except ValueError:
             pass
 
+        # An audio recording's sound, decoded as a receiver's audio: no
+        # frequency of its own, and the file's own rate.
+        as_audio = options.decodes_as_audio(protocol)
+
         def show(batch: Any) -> None:
             for msg, at in batch:
                 counts["messages"] += 1
                 # The file's frequency and rate (not the receiver's); 0 when
                 # the file doesn't say where it was made.
+                freq = options.center_hz + offset if options.center_hz else 0.0
                 self._push_decoded_message(
                     msg,
                     note=f"from {options.name} at {at:.1f} s",
-                    freq_hz=options.center_hz + offset if options.center_hz else 0.0,
-                    sample_rate=options.sample_rate,
+                    freq_hz=0.0 if as_audio else freq,
+                    sample_rate=options.frame_rate if as_audio else options.sample_rate,
                     source=options.name,
                     when=start + timedelta(seconds=at) if start else None,
                     at_s=at,
@@ -11606,6 +11673,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if options.center_hz
             else ""
         )
+        if as_audio:
+            where = ", read as a receiver's audio"
         if result.error is not None:
             logger.warning(f"Decoding {path} failed: {result.error}")
             QMessageBox.warning(
@@ -11640,6 +11709,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"{options.name}{where}{failed}.{unread}",
                 "success",
                 8000,
+            )
+        elif as_audio:
+            if audio_input(protocol) == "AM":
+                holds = "a receiver's AM audio"
+            elif protocol in ("POCSAG", "FLEX"):
+                holds = (
+                    "a receiver's FM discriminator audio (its speaker's, "
+                    "de-emphasised and cut below 300 Hz, holds no pages)"
+                )
+            else:
+                holds = "a receiver's FM audio"
+            self._show_status_message(
+                f"No {protocol} messages in {options.name}{where}. Check the "
+                f"protocol, and that it holds {holds}.",
+                "warning",
+                10000,
             )
         else:
             self._show_status_message(

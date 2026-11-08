@@ -1472,6 +1472,9 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._shown = source
         self._offer_sources()
         if record is not None and changed:
+            # (setPlainText gives the text the format at the text box's
+            # cursor: after a line being received, its accent color.)
+            self._recorded.setCurrentCharFormat(self._format(False))
             self._recorded.setPlainText("\n".join(record.lines))
             self._shown_live = False
             self._replace_shown_live(self._receiver_live.get(self._shown_mark(), ""))

@@ -495,6 +495,24 @@ def _last_block_color(edit):
     return cursor.charFormat().foreground().color().name()
 
 
+def _accent_lines(edit):
+    """The lines of a text box shown in the accent color (as the line
+    being received is)."""
+    from PyQt6.QtGui import QTextCursor
+
+    from sdr_module.gui.themes import get_palette
+
+    accent = get_palette().qcolor("accent").name()
+    lines, block = [], edit.document().firstBlock()
+    while block.isValid():
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.NextCharacter)
+        if cursor.charFormat().foreground().color().name() == accent:
+            lines.append(block.text())
+        block = block.next()
+    return lines
+
+
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestTheLineItIsReceiving(_Case):
     """R7L-4 (final review): the Second Receiver's Morse line still being
@@ -611,6 +629,39 @@ class TestTheLineItIsReceiving(_Case):
             self.assertEqual(view.shown_text(), "CQ DE SECOND\nVVV")
             accent = themes.get_palette().qcolor("accent").name()
             self.assertEqual(_last_block_color(view._recorded), accent, theme)
+
+    def test_shown_again_only_the_line_being_received_is_in_accent(self):
+        # (Checker: the text box rebuilt for another entry took the color
+        # of its last character, the accent color of the line that was
+        # being received: every finished line, and a recording's, read as
+        # if still being received.)
+        from sdr_module.gui.decoder_views import receiver_source
+
+        p, view = self.panel, self.view
+        key = receiver_source(RX2)
+        self.add(_morse("VVV DE SDR"), receiver=RX2)
+        p.set_receiver_live(RX2, "CQ")
+        self.assertEqual(_accent_lines(view._recorded), ["CQ"])
+        # Live picked under Showing:, then the Second Receiver's again.
+        view.source_bar().choose("")
+        _settle(1)
+        p.set_receiver_live(RX2, "CQ CQ")
+        view.source_bar().choose(key)
+        _settle(1)
+        self.assertEqual(view.shown_text(), "VVV DE SDR\nCQ CQ")
+        self.assertEqual(_accent_lines(view._recorded), ["CQ CQ"])
+        # A recording decoded meanwhile: none of its lines is being received.
+        self.add(_morse("CQ DE REC"), source="cw.wav", at_s=75.0)
+        self.add(_morse("TU"), source="cw.wav", at_s=80.0)
+        self.assertEqual(view.shown_source(), "cw.wav")
+        self.assertEqual(view.shown_text(), "1:15  CQ DE REC\n1:20  TU")
+        self.assertEqual(_accent_lines(view._recorded), [])
+        # Clear, then a recording: the same.
+        p.clear()
+        _settle(1)
+        self.add(_morse("CQ DE REC"), source="cw.wav", at_s=75.0)
+        self.assertEqual(view.shown_text(), "1:15  CQ DE REC")
+        self.assertEqual(_accent_lines(view._recorded), [])
 
 
 # --------------------------------------------------------------------------- #

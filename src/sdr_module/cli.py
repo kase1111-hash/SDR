@@ -777,10 +777,7 @@ def cmd_decode(args: argparse.Namespace) -> int:
         if morse_rate:
             return _decode_morse_audio(args, input_path, morse_rate)
     if args.pitch is not None:
-        print(
-            f"Error: {_PITCH_IS}; {input_path.name} is read as I/Q: give --offset "
-            "(Hz from its center) instead."
-        )
+        print(f"Error: {_pitch_refused(args, input_path)}")
         return 1
 
     audio_rate = _audio_rate(args, input_path)
@@ -843,6 +840,29 @@ def cmd_decode(args: argparse.Namespace) -> int:
 
 #: What ``sdr-scan decode --pitch`` is (for the messages that refuse it).
 _PITCH_IS = "--pitch is the pitch of a Morse tone (cw) in a one-channel audio recording"
+
+
+def _pitch_refused(args: argparse.Namespace, path: Path) -> str:
+    """Why ``--pitch`` doesn't apply to ``path``, a file not read as a
+    one-channel audio recording (:func:`_own_audio_rate`), as the I/Q
+    reader says it: it can't be read; its rate is unknown (one channel: an
+    audio rate given with ``--sample-rate`` makes it audio); or it is read
+    as I/Q, where ``--offset`` says where the channel is."""
+    from .dsp.recording import IQPlayer, SampleFormat
+
+    sample_format = SampleFormat(args.format) if args.format else None
+    try:
+        with IQPlayer(path, sample_format) as player:
+            wav = player.wav_header
+            unknown = not player.sample_rate
+    except (OSError, ValueError) as exc:
+        return f"{path.name} can't be read: {exc}"
+    if wav is not None and wav.channels == 1 and unknown and not args.sample_rate:
+        return "sample rate unknown for this file; specify --sample-rate (Hz)."
+    return (
+        f"{_PITCH_IS}; {path.name} is read as I/Q: give --offset (Hz from its "
+        "center) instead."
+    )
 
 
 def _audio_rate(args: argparse.Namespace, path: Path) -> float:

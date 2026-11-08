@@ -382,6 +382,35 @@ class TestMorseInAnAudioRecording:
             out = capsys.readouterr().out
             assert "--pitch is the pitch of a Morse tone" in out, out
 
+    def test_pitch_says_why_a_file_isnt_read_as_audio(self, tmp_path, capsys):
+        """(A file that can't be read, or a one-channel one whose rate is
+        unknown, is said so, as without --pitch: it was "read as I/Q: give
+        --offset", which then said it can't be read, or read the file at
+        an audio rate given with --sample-rate as audio after all.)"""
+        from tests.wav_builders import encode, fmt_body, write_wav
+
+        tone = 0.5 * np.sin(np.arange(8000) / 3.0)
+        broken = tmp_path / "s24_le.wav"
+        write_wav(broken, fmt_body(1, 8000, 4, bits=24), encode(tone, "int", 3))
+        three = tmp_path / "three.wav"
+        write_wav(three, fmt_body(3, 8000, 2), encode(np.tile(tone, 3), "int", 2))
+        unknown = tmp_path / "rate0.wav"
+        write_wav(unknown, fmt_body(1, 0, 2), encode(tone, "int", 2))
+        for path, said in (
+            (broken, "Error: s24_le.wav can't be read: its 24-bit samples are"),
+            (three, "Error: three.wav can't be read: it has 3 channels"),
+            (unknown, "Error: sample rate unknown for this file; specify --sample-"),
+        ):
+            assert main(["decode", "cw", "-i", str(path), "--pitch", "700"]) == 1
+            out = capsys.readouterr().out
+            assert said in out, out
+            assert "give --offset" not in out, out
+        argv = ["decode", "cw", "-i", str(unknown), "--pitch", "700"]
+        assert main(argv + ["--sample-rate", "8000"]) == 0
+        assert "its Morse tone at 700 Hz (given with --pitch)" in (
+            capsys.readouterr().out
+        )
+
     def test_max_samples_counts_its_own_samples(self, tmp_path, capsys):
         """(As the other audio decoders count them.)"""
         path, _frames = self._cw(tmp_path / "cw.wav")

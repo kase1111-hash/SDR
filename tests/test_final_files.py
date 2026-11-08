@@ -135,12 +135,16 @@ class TestAOneChannelFileWithoutARate(_WavCase):
         self.assertEqual(
             dialog._center_hint.text(), "the middle of its own frequencies"
         )
+        # The file's own samples, at the rate asked: 96,000 at 48 kS/s, two
+        # seconds (it said "48,000 samples", its I/Q's, next to 48 kS/s).
         self.assertIn(
-            "48,000 samples, 0:02.0 long, 0.000–0.024 MHz", dialog.check_text()
+            "96,000 samples, 0:02.0 long, 0.000–0.024 MHz", dialog.check_text()
         )
         dialog._rate_edit.setText("8k")  # (another rate: the center follows)
         self.assertEqual(dialog._center_edit.text(), "0.002 MHz")
-        self.assertIn("0:12.0 long, 0.000–0.004 MHz", dialog.check_text())
+        self.assertIn(
+            "96,000 samples, 0:12.0 long, 0.000–0.004 MHz", dialog.check_text()
+        )
         dialog._rate_edit.setText("48 kS/s")
         dialog._on_accept()
         chosen = dialog.options()

@@ -37,6 +37,7 @@ from ..dsp.recording import (
     guess_sample_format,
     sigmf_format,
 )
+from ..dsp.wav_file import read_wav_header
 from .file_dialogs import display_path
 
 try:
@@ -676,6 +677,14 @@ if HAS_PYQT6:
             )
             self._result: Optional[IqFileOptions] = None
             self._refit = False
+            # A one-channel file's own samples (its I/Q's are half as many):
+            # counted at the rate asked, which is its own too.
+            self._own_samples: Optional[int] = None
+            if options.real_signal:
+                try:
+                    self._own_samples = read_wav_header(options.path).frames
+                except (OSError, ValueError):
+                    pass  # (its I/Q's are counted then)
             self.setWindowTitle(f"Import Options – {options.name}")
             self.setMinimumWidth(500)
             self._build(guesses or {})
@@ -963,6 +972,8 @@ if HAS_PYQT6:
                 return
             assert options is not None
             count = options.total_samples
+            if self._own_samples is not None:
+                count = self._own_samples  # (at its own rate, as asked)
             text = f"{count:,} samples"
             if options.sample_rate:
                 text += f", {format_duration(options.duration_s)} long"

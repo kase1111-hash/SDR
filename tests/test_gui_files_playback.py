@@ -96,6 +96,30 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
                 self.assertAlmostEqual(played, 4.0 * speed, delta=2048 / (rate / 2))
                 win._playback.close()
 
+    def test_from_1x_to_another_speed_without_a_gap(self):
+        """At 1x such a recording's blocks are heard as they are (half a
+        second each for 8 kHz audio); another speed chosen then takes over
+        that sound with the time-stretch. Its blocks are as far apart as
+        before, so what the stretch keeps for the frames between them must
+        be a block's worth from the first (kept for a pile-up's catch-up,
+        it ran out: the speaker ran dry for 0.1 to 0.3 s in the first
+        second)."""
+        win = self.win
+        for rate, speed in ((8000, 0.5), (8000, 4.0), (22050, 2.0), (22050, 4.0)):
+            with self.subTest(rate=rate, speed=speed):
+                # (The last one's sound has played out.)
+                self.clock.advance(1.0)
+                self.heard.clear()
+                self.open_audio(rate, seconds=20.0)
+                self.frames(3.0)
+                start = self.clock.now
+                win._playback_bar.set_speed(speed)
+                self.frames(4.0)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.01)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
+
     def test_a_sound_plays_on_between_blocks_from_its_start(self):
         """Tone bursts in 8 kHz audio at 0.5x with the squelch on: within
         each burst's sound (from the frame the squelch opens to the one it

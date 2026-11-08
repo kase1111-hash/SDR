@@ -288,6 +288,9 @@ class PlaybackSound:
         steady = elapsed <= self.STALL_S
         wait = self._longest_wait(now)
         self._last = now
+        # (This block starts the stretch: a new sound, or one that played
+        # as it is at 1x taken over.)
+        first = not self._stretching
         if not self._stretching:
             if one and pace >= self.ENGAGE_BELOW:
                 self._passing = True
@@ -329,14 +332,16 @@ class PlaybackSound:
             self._held_max(self._swings, now, swing)
         # (Never more than fits AudioSink's own buffer: see MOST_HELD_S.)
         want = min(want, max(0.0, most - remaining))
-        if not self._flowing and seconds > self.STALL_S * max(pace, self.MIN_RATIO):
+        starting = first or not self._flowing
+        if starting and seconds > self.STALL_S * max(pace, self.MIN_RATIO):
             # A sound's first block holds more than a stall's worth of it:
             # a recording slower than a display block a frame, whose blocks
             # are given out over the frames until the next one (:meth:`more`;
             # 8 kHz audio in a one-channel file: half a second a block).
             # What this one keeps for later is such a swing from the start:
             # taken for a pile-up, it was rushed through, and the speaker
-            # ran dry before the next block.
+            # ran dry before the next block. (So with the first block the
+            # stretch takes over from 1x, another speed chosen.)
             allowance = self._held_max(self._swings, now, seconds - want * pace)
             target = lookahead + self.MARGIN_S + allowance
         wanted = want * self.rate + self._carry

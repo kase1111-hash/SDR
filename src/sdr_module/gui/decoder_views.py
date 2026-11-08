@@ -17,18 +17,20 @@ neither dim nor go as the wall clock runs on.
 
 What another receiver decodes (the Second Receiver window's, marked
 "2nd RX") is live too: its aircraft join the live list (the same sky, one
-row per aircraft whichever receiver heard it, saying which did and when),
-and its Morse text is an entry of its own under "Showing:" (two receivers'
-texts mixed line by line would make no sense).
+row per aircraft whichever receiver heard it, saying which did and when,
+a reply both heard counted once), and its Morse text is an entry of its
+own under "Showing:" (two receivers' texts mixed line by line would make
+no sense).
 """
 
 from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
@@ -231,15 +233,25 @@ class AircraftTracker:
 
     ``ages`` False: a recording's aircraft, timed by the recording's clock
     (``update(msg, at=...)``), which are never stale and never dropped.
+
+    Two receivers on 1090 MHz hear the same replies, each decoding its own
+    copy (the same frame, bit for bit): a message is counted once, however
+    many receivers' copies of its reply come (see :meth:`_is_copy`).
     """
 
     STALE_S = 60.0
     DROP_S = 300.0
+    #: Another receiver's copy of a reply comes within this (s) of the
+    #: first copy: counted once.
+    COPY_S = 2.0
 
     def __init__(self, clock: Callable[[], float] = time.monotonic, ages: bool = True):
         self._clock = clock
         self.ages = bool(ages)
         self._aircraft: Dict[str, Aircraft] = {}
+        # Each live aircraft's frames of the last COPY_S, oldest first:
+        # when it came, the frame, and the receivers whose copy came.
+        self._frames: Dict[str, Deque[Tuple[float, bytes, Set[str]]]] = {}
 
     def __len__(self) -> int:
         return len(self._aircraft)
@@ -253,6 +265,7 @@ class AircraftTracker:
 
     def clear(self) -> None:
         self._aircraft.clear()
+        self._frames.clear()
 
     def is_stale(self, aircraft: Aircraft) -> bool:
         return self.ages and self._clock() - aircraft.last_seen > self.STALE_S
@@ -271,9 +284,11 @@ class AircraftTracker:
         aircraft = self._aircraft.get(icao)
         if aircraft is None:
             aircraft = self._aircraft[icao] = Aircraft(icao=icao, first_seen=now)
-        aircraft.messages += 1
+        receiver = str(receiver or "")
+        if not self._is_copy(icao, msg, receiver, now):
+            aircraft.messages += 1
         aircraft.last_seen = now
-        aircraft.heard_by[str(receiver or "")] = now
+        aircraft.heard_by[receiver] = now
         callsign = str(getattr(msg, "callsign", "") or "").strip()
         if callsign:
             aircraft.callsign = callsign
@@ -309,6 +324,30 @@ class AircraftTracker:
             aircraft.on_ground = bool(getattr(msg, "on_ground", False))
         return aircraft
 
+    def _is_copy(self, icao: str, msg: Any, receiver: str, now: float) -> bool:
+        """Whether ``msg`` is another receiver's copy of a reply counted
+        already: the same frame, bit for bit, as one another receiver (not
+        ``receiver``) delivered within ``COPY_S``, the copies paired in the
+        order they came. A receiver's own repeat of a frame is another
+        reply (an aircraft sends some frames again and again). Never for a
+        message without its frame, or in a recording's list (one
+        receiver)."""
+        frame = getattr(msg, "raw_bits", b"")
+        if not self.ages or not isinstance(frame, (bytes, bytearray)) or not frame:
+            return False
+        frame = bytes(frame)
+        recent = self._frames.get(icao)
+        if recent is None:
+            recent = self._frames[icao] = deque(maxlen=64)
+        while recent and now - recent[0][0] > self.COPY_S:
+            recent.popleft()
+        for _when, seen, heard in recent:
+            if seen == frame and receiver not in heard:
+                heard.add(receiver)
+                return True
+        recent.append((now, frame, {receiver}))
+        return False
+
     def expire(self) -> List[str]:
         """Drop aircraft not heard for ``DROP_S``; returns their addresses."""
         if not self.ages:
@@ -317,6 +356,7 @@ class AircraftTracker:
         gone = [icao for icao, a in self._aircraft.items() if a.last_seen < cutoff]
         for icao in gone:
             del self._aircraft[icao]
+            self._frames.pop(icao, None)
         return gone
 
 

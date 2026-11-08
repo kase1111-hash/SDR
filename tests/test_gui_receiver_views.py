@@ -232,6 +232,116 @@ class TestItsAircraft(_Case):
         self.assertNotIn(RX2, view.detail_text("4840D6"))
 
 
+def _frames():
+    """The demo airliner's identification, even position and velocity
+    frames, as both receivers decode them (bit for bit)."""
+    from sdr_module.gui.device_dialog import _aircraft_frame
+
+    return [_aircraft_frame(kind, 0.35) for kind in ("ident", "even", "velocity")]
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestAReplyBothReceiversHeard(_Case):
+    """ui-5 (final review): both receivers on 1090 MHz hear the same
+    replies, each decoding its own copy of a reply (the same frame, bit for
+    bit). The Aircraft view's Msgs and the line under it counted every
+    copy: KLM1023 read 66 messages while each receiver, and the Decoder
+    tab's status line, said 33. A reply is counted once now; which
+    receivers heard it, and when, is said as before."""
+
+    def setUp(self):
+        super().setUp()
+        self.panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        self.view = self.panel._aircraft_view
+
+    def msgs(self):
+        ident, even, velocity = _frames()
+        return [
+            _klm(raw_bits=ident, type_code=4, callsign="KLM1023", altitude=0),
+            _klm(raw_bits=even),
+            _klm(raw_bits=velocity, type_code=19, velocity=450.0, heading=265.0),
+        ]
+
+    def test_it_counts_once_and_still_says_which_receivers_heard_it(self):
+        from sdr_module.gui import decoder_views as dv
+
+        view = self.view
+        msgs = self.msgs()
+        for msg in msgs:
+            self.add(msg)  # (this window's receiver)
+        self.now += 0.5
+        for msg in msgs:
+            self.add(msg, receiver=RX2)  # (the Second Receiver's copies)
+        aircraft = view.tracker.get("4840D6")
+        self.assertEqual(aircraft.messages, 3)  # (it was 6)
+        row = view._items["4840D6"].row()
+        self.assertEqual(view.table.item(row, dv.AC_MESSAGES).text(), "3")
+        line = view.detail_text("4840D6")
+        self.assertIn("3 messages", line)
+        self.assertIn("(main receiver just now, 2nd RX just now)", line)
+        # The Messages table keeps each receiver's rows, as before.
+        self.assertEqual(len(self.panel._messages), 6)
+        # Whichever receiver's copy comes first.
+        self.add(_klm(raw_bits=_frames()[1][:-1] + b"\x00"), receiver=RX2)
+        self.add(_klm(raw_bits=_frames()[1][:-1] + b"\x00"))
+        self.assertEqual(aircraft.messages, 4)
+
+    def test_a_frame_sent_again_is_another_reply(self):
+        velocity = self.msgs()[2]
+        self.add(velocity)
+        self.add(velocity, receiver=RX2)
+        self.now += 0.5  # (the aircraft sends the same velocity again)
+        self.add(velocity, receiver=RX2)
+        self.add(velocity)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+
+    def test_what_only_one_receiver_heard_counts(self):
+        ident, even, _velocity = self.msgs()
+        self.add(ident)
+        self.add(even, receiver=RX2)  # (only the Second Receiver heard it)
+        self.add(ident, receiver=RX2)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+        # The same frame long after: another reply.
+        self.now += 10.0
+        self.add(even)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 3)
+
+    def test_one_receiver_alone_counts_every_frame(self):
+        velocity = self.msgs()[2]
+        for receiver in ("", RX2):
+            self.add(velocity, receiver=receiver)
+            self.add(velocity, receiver=receiver)  # (sent again, not a copy)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+
+    def test_messages_without_their_frame_count_as_before(self):
+        self.add(_klm())
+        self.add(_klm(), receiver=RX2)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+
+    def test_after_clear_a_late_copy_is_counted(self):
+        # (A copy of a reply heard before Clear, decoded after it: the
+        # aircraft is listed anew with that message.)
+        velocity = self.msgs()[2]
+        self.add(velocity)
+        self.panel.clear()
+        _settle(1)
+        self.add(velocity, receiver=RX2)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 1)
+        row = self.view._items["4840D6"].row()
+        from sdr_module.gui import decoder_views as dv
+
+        self.assertEqual(self.view.table.item(row, dv.AC_MESSAGES).text(), "1")
+
+    def test_a_recordings_list_counts_every_message(self):
+        # (One recording, one receiver: nothing in it is another's copy.)
+        velocity = self.msgs()[2]
+        self.add(velocity)
+        for at in (0.1, 0.2):
+            self.add(velocity, source=REC, at_s=at)
+        self.assertEqual(self.view.tracker_for(REC).get("4840D6").messages, 2)
+
+
 # --------------------------------------------------------------------------- #
 # The Aircraft tab while the main receiver decodes something else
 # --------------------------------------------------------------------------- #

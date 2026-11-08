@@ -6139,7 +6139,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         None: the decoder is turned off or rebuilt). While a recording
         plays it gives no rate to choose: whether one plays now, as the
         Decoder tab's line has it (a recording at the device's rate keeps
-        the decoder built for the device)."""
+        the decoder built for the device). Nor while the Decoder tab's line
+        says the decoder misses part of the signal (this computer, the
+        device or a job can't keep up, see _sync_decoder_skipping): a
+        lower rate helps then, as that line says, and 2.5 MS/s or more
+        (no limit to the decoder's work) would only add to it (R7W-05)."""
         from ..dsp.live_decoders import skipped_text
 
         said = self._own("_busy_sky_said") or ""
@@ -6147,7 +6151,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         text = skipped_text(
             getattr(status, "skipped_per_s", 0.0) or 0.0,
             float(getattr(status, "sample_rate", 0.0) or 0.0),
-            bool(playback is not None and playback.active),
+            bool(playback is not None and playback.active)
+            or bool(self._own("_skip_hinted")),  # (no rate to choose)
         )
         if not text:
             if said:

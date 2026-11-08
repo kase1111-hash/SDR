@@ -399,15 +399,27 @@ def wav_values(
     """A WAV file's samples (``data``: the bytes as stored, each channel's
     sample in turn) as float32, full scale 1.0: 8-bit unsigned (128 is
     zero) over 128, wider integers over their largest value (16-bit over
-    32767, 24-bit over 8388607, 32-bit over 2147483647), floating point as
-    stored. Converted in place into ``out`` (float32, one value a sample)
-    when given; a trailing partial sample is ignored."""
+    32767, 24-bit over 8388607, also in 32-bit words, 32-bit over
+    2147483647), floating point as stored. Converted in place into ``out``
+    (float32, one value a sample) when given; a trailing partial sample is
+    ignored."""
     width = header.sample_width
     count = len(data) // width
     if out is None:
         out = np.empty(count, dtype=np.float32)
     raw = memoryview(data)[: count * width]
-    if header.sample_type == "float":
+    if header.justified:
+        # 24-bit samples in 32-bit words (header.justified says where):
+        # each at the top of its word ("right": moved up from the low three
+        # bytes, the top byte, a copy of the sign or zero, falling off), an
+        # int32 of 256 times the sample; over 256 times 8388607, as packed
+        # 24-bit samples are read.
+        words = np.frombuffer(raw, dtype="<u4").astype(np.uint32, copy=False)
+        if header.justified == "right":
+            words = np.left_shift(words, np.uint32(8))
+        out[:] = words.view(np.int32)
+        np.divide(out, np.float32(8388607.0 * 256.0), out=out)
+    elif header.sample_type == "float":
         # (A float64 too big for float32 reads as infinity, not a warning.)
         with np.errstate(over="ignore", invalid="ignore"):
             out[:] = np.frombuffer(raw, dtype="<f4" if width == 4 else "<f8")
@@ -1967,7 +1979,7 @@ class AudioPlayer:
         sample_format = (
             AudioSampleFormat.FLOAT32
             if header.sample_type == "float"
-            else formats.get(header.sample_width, AudioSampleFormat.FLOAT32)
+            else formats.get(header.bits // 8, AudioSampleFormat.FLOAT32)
         )
         self._header = header
 
@@ -3170,9 +3182,11 @@ class FormatDetector:
         """Detect WAV file format: classic, RF64 (past 4 GiB), BW64 or Sony
         Wave64 (``wav_container`` in its metadata says which), how its
         samples are stored (``wav_sample_type``: "int" or "float",
-        ``wav_sample_width`` in bytes) and, for one channel (a real
-        signal), the I/Q it is read as (``wav_frame_rate``: its own rate,
-        the header's, or ``own_rate`` when the header gives none)."""
+        ``wav_sample_width`` in bytes, ``wav_sample_bits``: 24 in 32-bit
+        words, ``wav_sample_justified`` saying where: see
+        WavHeader.justified) and, for one channel (a real signal), the I/Q
+        it is read as (``wav_frame_rate``: its own rate, the header's, or
+        ``own_rate`` when the header gives none)."""
         try:
             header = read_wav_header(filepath)
             file_size = filepath.stat().st_size
@@ -3216,11 +3230,13 @@ class FormatDetector:
             num_channels=n_channels,
             file_size_bytes=file_size,
             duration_seconds=duration,
-            bits_per_sample=sample_width * 8,
+            bits_per_sample=header.bits,
             is_valid=True,
             metadata={
                 "wav_channels": n_channels,
                 "wav_sample_width": sample_width,
+                "wav_sample_bits": header.bits,
+                "wav_sample_justified": header.justified,
                 "wav_sample_type": header.sample_type,
                 "wav_frame_rate": header.frame_rate or frame_rate,
                 "wav_container": header.container,

@@ -95,7 +95,8 @@ TAPS = hilbert_taps(CONTEXT)
 
 #: Up to this rate (Hz) a one-channel recording is probably audio, a
 #: receiver's sound (an IF or RF sampled directly is faster): File > Decode
-#: Recording and ``sdr-scan decode`` decode its sound as a receiver's audio.
+#: Recording and ``sdr-scan decode`` decode its sound as a receiver's audio
+#: (unless its metadata places it elsewhere: :func:`is_audio`).
 AUDIO_RATE_MAX = 200e3
 
 
@@ -108,6 +109,22 @@ def iq_center(frame_rate: float) -> float:
     """The frequency in a real recording that the I/Q is centred on (0 Hz
     of the I/Q): a quarter of its rate, the middle of 0 to half the rate."""
     return float(frame_rate) / 4.0
+
+
+def is_audio(frame_rate: float, center_hz: float = 0.0) -> bool:
+    """Whether a one-channel recording whose own rate is ``frame_rate``,
+    centred on ``center_hz`` (0: nothing places it), is probably a
+    receiver's audio, its sound, rather than an IF or RF sampled directly:
+    an audio rate (up to :data:`AUDIO_RATE_MAX`) at its own frequencies (0
+    Hz to half its rate, centred on a quarter of it). One its metadata
+    places elsewhere (an IF at 10.7 MHz) holds that IF, decoded from its
+    I/Q there. The window's File menu (Open, Recording Info, Convert and
+    Decode Recording) and ``sdr-scan decode`` go by this one rule."""
+    rate = float(frame_rate or 0.0)
+    if not 0 < rate <= AUDIO_RATE_MAX:
+        return False
+    center = float(center_hz or 0.0)
+    return not center or abs(center - iq_center(rate)) <= 0.5
 
 
 def iq_count(frames: int) -> int:

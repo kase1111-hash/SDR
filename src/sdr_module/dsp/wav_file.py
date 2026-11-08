@@ -23,7 +23,10 @@ write, so a file cut short (a crash) still reads to its last write.
 A size larger than the file (a recording cut short), an unknown one
 (0xFFFFFFFF, written while streaming; in RF64 or Wave64 also a size never
 filled in) and a classic 32-bit size that went round past 4 GiB (a writer
-that knows no RF64) are all read as what the file holds.
+that knows no RF64) are all read as what the file holds. 24-bit samples in
+32-bit words (ALSA's arecord wrote S24_LE so), whose header doesn't say
+where in each word a sample lies, are read where their data shows them to
+be (:attr:`WavHeader.justified`).
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ import struct
 import wave
 from dataclasses import dataclass
 from typing import IO, Any, Dict, Optional, Tuple, Union
+
+import numpy as np
 
 #: The largest number a 32-bit size field holds; RF64 writes it in place of
 #: the sizes its ds64 chunk gives.
@@ -72,6 +77,10 @@ _RIFF_IDS = (b"RIFF", b"RF64", b"BW64")
 _DS64_BODY = 28  # RIFF size, data size, sample count (64-bit), table length
 _MAX_CHUNKS = 4096  # (looked at before the data: a damaged file ends)
 _MAX_READ = 1 << 16  # (bytes of a fmt or ds64 chunk read)
+#: Where 24-bit samples lie in their 32-bit words is told from this many
+#: stretches of the data, spread through it, of this many words each.
+_LAYOUT_STRETCHES = 8
+_LAYOUT_WORDS = 4096
 
 #: A file to read or write: its path, or a binary file open on it.
 Source = Union[str, "os.PathLike[str]", IO[bytes]]
@@ -88,7 +97,8 @@ class WavHeader:
     #: "RIFF" (a classic WAV file), "RF64", "BW64" or "W64" (Sony Wave64).
     container: str
     channels: int
-    #: Bytes of one channel's sample (1: 8-bit, 2: 16-bit, 3: 24-bit...).
+    #: Bytes of one channel's sample as stored (1: 8-bit, 2: 16-bit, 3:
+    #: 24-bit...; 4 for 24-bit samples in 32-bit words: :attr:`justified`).
     sample_width: int
     #: Frames (a sample of every channel) a second.
     frame_rate: int
@@ -100,17 +110,30 @@ class WavHeader:
     #: unsigned with 128 as zero, wider ones signed) or "float" (IEEE
     #: floating point: WAV format 3, or the extensible format's float).
     sample_type: str = "int"
+    #: 24-bit samples in 32-bit words (a header giving 24 bits a sample in
+    #: 4 bytes: ALSA's arecord wrote S24_LE so), where in each word they lie
+    #: as the data shows: "left", the word's top three bytes (its low byte
+    #: zero: read as a 32-bit sample), or "right", its low three (as
+    #: arecord's: sign-extended from bit 23, the top byte a copy of the sign
+    #: or zero). "" for samples that fill their bytes.
+    justified: str = ""
 
     @property
     def frame_bytes(self) -> int:
         return self.channels * self.sample_width
 
     @property
+    def bits(self) -> int:
+        """Bits of each sample: 24 in a 32-bit word (:attr:`justified`),
+        else its bytes' (20 bits in 3 bytes are read as 24)."""
+        return 24 if self.justified else 8 * self.sample_width
+
+    @property
     def sample_name(self) -> str:
         """How each sample is stored, in words: "16-bit integer",
         "24-bit integer", "32-bit float"..."""
         kind = "float" if self.sample_type == "float" else "integer"
-        return f"{8 * self.sample_width}-bit {kind}"
+        return f"{self.bits}-bit {kind}"
 
     @property
     def frames(self) -> int:
@@ -162,7 +185,8 @@ def read_wav_header(source: Source) -> WavHeader:
     Raises WavError (a ValueError) for a file that isn't WAV or whose
     samples are in a form not read (:data:`READ_WIDTHS`: e.g. compressed,
     or 64-bit integers; or in words wider than their bits, whose block
-    align says so: 24-bit samples in 32-bit words), saying which, and
+    align says so, except 24-bit samples in 32-bit words that the data
+    shows where they lie: :attr:`WavHeader.justified`), saying which, and
     OSError when it can't be read.
     """
     handle, own = _opened(source)
@@ -190,34 +214,99 @@ def read_wav_header(source: Source) -> WavHeader:
             f"its samples are {bits}-bit {what}, and this app reads 8-, 16-, 24- "
             "and 32-bit integer and 32- and 64-bit floating-point WAV files"
         )
+    justified = ""
+    data_bytes = _data_bytes(found)
     if align > channels * width:
         # Frames wider than their samples (the block align): 24-bit samples
         # in 32-bit words, as ALSA's arecord wrote S24_LE. Where in its word
         # each sample lies (left-justified, or the low three bytes as
         # arecord's) the header doesn't say: libsndfile calls it ambiguous.
-        # Read as packed samples they were noise, a third more of them. (A
-        # block align of 0, or short of the samples, is a slip: they are
-        # packed, and read so.)
+        # Read as packed samples they were noise, a third more of them; the
+        # data shows which it is (_word_layout). (A block align of 0, or
+        # short of the samples, is a slip: they are packed, and read so.)
         if align % channels:
             raise WavError(
                 f"its format (fmt) chunk is damaged: {align} bytes a frame of "
                 f"{channels} {bits}-bit samples"
             )
-        raise WavError(
-            f"its {bits}-bit samples are stored in {8 * align // channels}-bit "
-            "words, and its header doesn't say where in each word a sample lies; "
-            f"save it with the samples packed ({width} bytes each) or as 32-bit "
-            "samples"
-        )
+        words = f"its {bits}-bit samples are stored in {8 * align // channels}-bit "
+        if sample_type == "int" and bits == 24 and align == 4 * channels:
+            justified = _word_layout(source, found.data_offset, data_bytes)
+            if not justified:
+                raise WavError(
+                    f"{words}words, and they lie neither in each word's top three "
+                    "bytes nor in its low three (the file may be damaged); save it "
+                    "with the samples packed (3 bytes each) or as 32-bit samples"
+                )
+            width = 4
+        else:
+            raise WavError(
+                f"{words}words, and its header doesn't say where in each word a "
+                f"sample lies; save it with the samples packed ({width} bytes "
+                "each) or as 32-bit samples"
+            )
     return WavHeader(
         container=found.container,
         channels=channels,
         sample_width=width,
         frame_rate=rate,
         data_offset=found.data_offset,
-        data_bytes=_data_bytes(found),
+        data_bytes=data_bytes,
         sample_type=sample_type,
+        justified=justified,
     )
+
+
+def _word_layout(source: Source, offset: int, data_bytes: int) -> str:
+    """Where 24-bit samples lie in the 32-bit words of the samples at
+    ``offset`` (``data_bytes`` of them), as their data shows it (their
+    header doesn't): "left" when each word's low byte is zero (the sample
+    in its top three bytes, as libsndfile finds them), "right" when each
+    word's top byte is a copy of the sign of the three below it, or zero
+    (the sample in its low three, as ALSA's arecord writes S24_LE), "" when
+    the words fit neither (packed samples under a wrong block align, Cool
+    Edit's floats...). Words from a few stretches spread through the file
+    are looked at; silent ones (zero) fit both. When both fit (16-bit sound
+    in the low three bytes, each word's low byte zero: the readings differ
+    only in level), "left", as libsndfile reads them: read as 32-bit
+    samples. Unless a top byte zero under a set bit 23 shows the words zero
+    above the sample (whose negative half read as 32-bit would turn
+    positive): "right". A binary file open on it (``source``) is left where
+    it was."""
+    count = max(0, int(data_bytes)) // 4
+    if count <= _LAYOUT_STRETCHES * _LAYOUT_WORDS:
+        starts, per = [0], count
+    else:
+        step = count // _LAYOUT_STRETCHES
+        starts, per = [k * step for k in range(_LAYOUT_STRETCHES)], _LAYOUT_WORDS
+    handle, own = _opened(source)
+    was = handle.tell()
+    try:
+        stretches = []
+        for start in starts:
+            handle.seek(offset + 4 * start)
+            raw = handle.read(4 * per)
+            stretches.append(np.frombuffer(raw[: len(raw) // 4 * 4], dtype="<u4"))
+    finally:
+        if own:
+            handle.close()
+        else:
+            # (Where the samples start, as read_wav_header leaves any file.)
+            handle.seek(was)
+    words = np.concatenate(stretches).astype(np.uint32)
+    words = words[words != 0]
+    if not words.size:
+        return "left"  # (silence: zeros either way)
+    top = words >> np.uint32(24)
+    negative = (words & np.uint32(1 << 23)) != 0
+    zero_top = top == 0
+    left = not np.any(words & np.uint32(0xFF))
+    right = bool(np.all(zero_top | ((top == 0xFF) & negative)))
+    if left and right and not np.any(zero_top & negative):
+        return "left"
+    if right:
+        return "right"
+    return "left" if left else ""
 
 
 def data_offset(source: Source) -> int:

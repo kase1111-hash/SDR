@@ -16,6 +16,7 @@ The files are packed by hand (``tests/wav_builders.py``), not by the code
 under test.
 """
 
+import io
 import struct
 
 import numpy as np
@@ -34,6 +35,7 @@ from sdr_module.dsp.recording import (
     load_audio_file,
     load_iq_file,
     save_iq_file,
+    wav_frames,
     write_sidecar,
 )
 from tests.wav_builders import (
@@ -231,22 +233,25 @@ class TestStillRefusedInPlainWords:
             wav_file.read_wav_header(path)
 
     @pytest.mark.parametrize("channels", [2, 1])
-    @pytest.mark.parametrize("justified", ["left", "right"])
-    def test_samples_in_wider_words_than_their_bits(
-        self, tmp_path, channels, justified
-    ):
+    @pytest.mark.parametrize("data", ["packed", "floats"])
+    def test_samples_in_wider_words_than_their_bits(self, tmp_path, channels, data):
         """files-3: a plain PCM fmt chunk saying 24 bits a sample with a
         block align of 4 bytes a channel (24-bit samples in 32-bit words, as
         ALSA's arecord wrote S24_LE) was read as packed 3-byte samples: a
         third more of them than the file holds, every one wrong (noise),
         with no word of it (the sample check trusts a WAV header). Where in
-        its word each sample lies the header doesn't say (left-justified,
-        or in the low three bytes as arecord's): refused in plain words."""
+        its word each sample lies the header doesn't say: R8-11 reads it
+        from the data (TestSamplesInWiderWords). Words that fit neither
+        layout (packed samples under a wrong block align, or Cool Edit's
+        floats labelled PCM: libsndfile's other readings of such a header)
+        are still refused in plain words."""
         x = _tone() if channels == 2 else _tone().real
-        ints = np.rint(interleave(x) * full_scale(3)).astype(np.int64)
-        words = ints << 8 if justified == "left" else ints  # (sign-extended)
+        if data == "packed":
+            raw = encode(interleave(x), "int", 3)
+        else:
+            raw = encode(interleave(x), "float", 4)
         path = tmp_path / "s24_le.wav"
-        write_wav(path, fmt_body(channels, RATE, 4, bits=24), integers(words, 4))
+        write_wav(path, fmt_body(channels, RATE, 4, bits=24), raw)
         said = "24-bit samples are stored in 32-bit words"
         with pytest.raises(wav_file.WavError, match=said):
             wav_file.read_wav_header(path)
@@ -295,6 +300,165 @@ class TestStillRefusedInPlainWords:
         assert "4 channels" in info.error_message
         with pytest.raises(ValueError, match="4 channels"):
             IQPlayer(path)
+
+
+def _s24_words(x, justified, top="sign"):
+    """``x`` (full scale 1.0) as 24-bit samples in 32-bit words: in each
+    word's top three bytes ("left", its low byte zero) or its low three
+    ("right", as ALSA's arecord writes S24_LE), its top byte then a copy
+    of the sign ("sign") or zero ("zero")."""
+    ints = np.rint(interleave(x) * full_scale(3)).astype(np.int64)
+    if justified == "left":
+        return integers(ints << 8, 4)
+    words = ints if top == "sign" else ints & 0xFFFFFF
+    return words.astype("<u4" if top == "zero" else "<i4").tobytes()
+
+
+class TestSamplesInWiderWords:
+    """R8-11: 24-bit samples in 32-bit words (a plain PCM header saying 24
+    bits a sample and 4 bytes a channel in its block align: ALSA's arecord
+    wrote S24_LE so) were refused (R7 files-3: the header doesn't say where
+    in each word a sample lies). They are read now, where the data shows
+    them to be, as libsndfile looks: each word's low byte zero, the sample
+    is in its top three bytes (read as a 32-bit sample); its top byte a copy
+    of the sign of the three below it, or zero, it is in its low three
+    (sign-extended from bit 23). The same in every reader."""
+
+    LAYOUTS = [("left", "sign"), ("right", "sign"), ("right", "zero")]
+
+    @pytest.mark.parametrize("channels", [2, 1])
+    @pytest.mark.parametrize("justified,top", LAYOUTS)
+    def test_every_reader_reads_them(self, tmp_path, channels, justified, top):
+        x = _tone(10001, freq=1234.0)
+        if channels == 1:
+            x = x.real
+        path = tmp_path / "s24_le.wav"
+        offset = write_wav(
+            path, fmt_body(channels, RATE, 4, bits=24), _s24_words(x, justified, top)
+        )
+        step = _step("int", 3)
+        header = wav_file.read_wav_header(path)
+        assert (header.sample_width, header.bits) == (4, 24)
+        assert header.justified == justified
+        assert header.sample_name == "24-bit integer"
+        assert (header.data_offset, header.frames) == (offset, len(x))
+        # Every reader: the header's, the frames', I/Q, audio, the check.
+        values = np.concatenate(list(wav_frames(path, 777)))
+        np.testing.assert_allclose(values, interleave(x), atol=step)
+        with AudioPlayer(path) as audio:
+            assert audio.total_samples == len(x)
+            assert audio.metadata.sample_format.name == "INT24"
+            audio.seek(5000)
+            got = audio.read(1000)
+            expected = interleave(x).reshape(len(x), channels)[5000:6000]
+            np.testing.assert_allclose(got.reshape(expected.shape), expected, atol=step)
+        info = detect_format(path)
+        assert info.is_valid, info.error_message
+        assert info.bits_per_sample == 24
+        assert info.metadata["wav_sample_bits"] == 24
+        assert info.metadata["wav_sample_justified"] == justified
+        check = check_iq_samples(path)
+        assert check.ok and not check.note, check
+        if channels == 2:
+            with IQPlayer(path) as player:
+                assert player.total_samples == len(x)
+                player.seek(7777)
+                np.testing.assert_allclose(player.read(1000), x[7777:8777], atol=step)
+            np.testing.assert_allclose(load_iq_file(path)[0], x, atol=step)
+        else:
+            # (A real signal, read as I/Q as from packed samples.)
+            packed = tmp_path / "packed.wav"
+            iq_wav(packed, x, "int", 3, RATE)
+            with IQPlayer(path) as player, IQPlayer(packed) as reference:
+                assert player.total_samples == reference.total_samples
+                player.seek(1000)
+                reference.seek(1000)
+                np.testing.assert_allclose(
+                    player.read(2000), reference.read(2000), atol=1e-6
+                )
+
+    def test_full_scale_is_one_as_for_packed_samples(self, tmp_path):
+        top = full_scale(3)
+        ints = np.array([top, -top - 1, 0, top // 2], np.int64)
+        expected = load_iq_file(_packed(tmp_path, ints))[0]
+        np.testing.assert_allclose(expected, [1 - (1 + 1 / top) * 1j, 0.5j], atol=1e-7)
+        for name, words in (
+            ("left", (ints << 8).astype("<i4")),
+            ("right", ints.astype("<i4")),
+            ("zero", (ints & 0xFFFFFF).astype("<u4")),
+        ):
+            path = tmp_path / f"{name}.wav"
+            write_wav(path, fmt_body(2, RATE, 4, bits=24), words.tobytes())
+            np.testing.assert_array_equal(load_iq_file(path)[0], expected)
+
+    def test_silence_reads_as_silence(self, tmp_path):
+        """(Every word zero: either layout gives zeros.)"""
+        path = tmp_path / "silence.wav"
+        write_wav(path, fmt_body(2, RATE, 4, bits=24), bytes(8 * 1000))
+        with IQPlayer(path) as player:
+            samples = player.read(2000)
+        assert len(samples) == 1000 and not np.any(samples)
+
+    def test_the_data_is_looked_at_throughout(self, tmp_path):
+        """(A take silent at first, its sound later: the words looked at
+        are spread through the file, not only its start.)"""
+        x = _tone(200000, freq=1234.0)
+        x[:150000] = 0
+        path = tmp_path / "late.wav"
+        write_wav(path, fmt_body(2, RATE, 4, bits=24), _s24_words(x, "right", "zero"))
+        assert wav_file.read_wav_header(path).justified == "right"
+        with IQPlayer(path) as player:
+            player.seek(160000)
+            np.testing.assert_allclose(
+                player.read(1000), x[160000:161000], atol=_step("int", 3)
+            )
+
+    def test_16_bit_sound_in_the_low_bytes(self, tmp_path):
+        """(16-bit sound arecord wrote as S24_LE, each word's low byte
+        zero: both layouts fit when its top byte copies the sign, and the
+        two readings differ only in level, 48 dB: read as 32-bit samples,
+        as libsndfile reads them. Zero there, read as 32-bit samples its
+        negative half would turn positive: it is read from the low bytes.)"""
+        rng = np.random.default_rng(7)
+        s16 = rng.integers(-20000, 20000, 4000).astype(np.int64)
+        x = s16 / 32767.0
+        for top, justified, scale in (("sign", "left", 2**-8), ("zero", "right", 1)):
+            words = s16 << 8
+            if top == "zero":
+                words = (words & 0xFFFFFF).astype("<u4")
+            path = tmp_path / f"s16_{top}.wav"
+            write_wav(
+                path, fmt_body(1, RATE, 4, bits=24), words.astype("<i4").tobytes()
+            )
+            assert wav_file.read_wav_header(path).justified == justified
+            values = np.concatenate(list(wav_frames(path)))
+            np.testing.assert_allclose(values, scale * x, atol=2e-4 * scale)
+
+    @pytest.mark.parametrize("container", ["RIFF", "RF64", "W64"])
+    def test_a_file_open_on_it_is_left_where_its_samples_start(
+        self, tmp_path, container
+    ):
+        """(read_wav_header of a binary file open on a WAV file leaves it
+        where the samples start, as it does for every other WAV file: the
+        words looked at to see where the samples lie left it after the
+        last of them.)"""
+        x = _tone(20000, freq=1234.0)
+        data = _s24_words(x, "right")
+        path = tmp_path / "s24_le.wav"
+        offset = write_wav(path, fmt_body(2, RATE, 4, bits=24), data, container)
+        with open(path, "rb") as handle:
+            assert wav_file.read_wav_header(handle).justified == "right"
+            assert handle.tell() == offset
+            assert handle.read(8) == data[:8]
+        handle = io.BytesIO(path.read_bytes())
+        assert wav_file.read_wav_header(handle).justified == "right"
+        assert handle.tell() == offset
+
+
+def _packed(tmp_path, ints):
+    path = tmp_path / "packed.wav"
+    write_wav(path, fmt_body(2, RATE, 3), integers(ints, 3))
+    return path
 
 
 class TestTheSampleCheck:

@@ -10192,7 +10192,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Everything else (Record Audio, SSTV, the decoders) keeps the
         recording's own pace."""
         sound = self._playback_sound
-        if self._playback.active or sound.stretching:
+        if self._playback.active or sound.holding:
             audio = sound.play(audio, time.monotonic(), last=last)
         self._audio.write(audio)
 
@@ -10204,11 +10204,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         at another speed the speaker gets what the time-stretch holds for
         it (M-P1 with M-F2: given out only with each block, a quarter of a
         second at most, the sound of such a file ran dry most of the time
-        at 0.5x). A sound nobody hears any more (the speaker off, the
-        Second Receiver's Listen) ends here, as the next block would end
-        it: what the stretch holds, faded out, and nothing after it (with
-        that block, up to a second later at 0.5x, it came back for a
-        moment after it had stopped)."""
+        at 0.5x), at 1x what the last block has still to give, as it is
+        (handed over whole, half a second of it, the speaker ran dry or
+        dropped some about twice a second). A sound nobody hears any more
+        (the speaker off, the Second Receiver's Listen) ends here, as the
+        next block would end it: what is held, faded out, and nothing
+        after it (with that block, up to a second later at 0.5x, it came
+        back for a moment after it had stopped)."""
         if not self._playback.active:
             return
         sound = self._playback_sound
@@ -10219,7 +10221,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         second = getattr(self, "_second_rx", None)
         if not self._audio_enabled or (second is not None and second.mutes_main()):
-            if sound.stretching:
+            if sound.holding:
                 self._speak(np.zeros(0, dtype=np.float32), last=True)
                 join.stop()
             return

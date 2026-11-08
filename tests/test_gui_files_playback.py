@@ -207,21 +207,135 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
         self.assertGreater(len(self.sound(since=start)) / AUDIO, 1.0)
         win._playback.close()
 
-    def test_1x_still_passes_the_blocks_as_they_are(self):
-        """(At 1x a recording that keeps up is heard as it is: the
-        frames between its blocks add nothing.)"""
+    def test_at_1x_too_its_sound_ends_at_once_when_this_receiver_isnt_heard(self):
+        """At 1x the rest of a block of 8 kHz audio is given out as it
+        plays (dsp-1): Listen in the Second Receiver window playing only
+        that one, or the Audio switched off, between two blocks ends it at
+        once (what is held, faded out), with nothing after it (it came back
+        with the next block, up to half a second later). Heard again, it
+        plays on."""
         win = self.win
         self.open_audio(8000)
-        self.frames(1.0)
-        self.heard.clear()
         self.frames(2.0)
-        self.assertFalse(win._playback_sound.stretching)
-        blocks = [b for _t, b in self.heard if len(b)]
-        self.assertGreaterEqual(len(blocks), 3)
-        # (Each a display block's sound or more: half a second of 8 kHz.)
-        for block in blocks:
-            self.assertGreaterEqual(len(block), int(2048 / 4000 * AUDIO))
+
+        def later(start):
+            """What the speaker got after the frame at ``start``."""
+            return [
+                (round(t - start, 3), round(len(b) / AUDIO, 3))
+                for t, b in self.heard
+                if len(b) and t >= start + 0.03
+            ]
+
+        for phase in (0.0, 0.2, 0.4):  # (somewhere between two blocks)
+            with self.subTest(phase=phase):
+                self.frames(phase)
+                self.assertGreater(win._playback_sound.waiting_s, 0.0)
+                with mock.patch.object(win._second_rx, "mutes_main", return_value=True):
+                    start = self.clock.now
+                    self.heard.clear()
+                    self.frames(1.2)  # (two blocks come)
+                    self.assertEqual(later(start), [])
+                    self.assertLess(len(self.sound()) / AUDIO, 0.15)
+                    self.assertFalse(win._playback_sound.holding)
+                start = self.clock.now
+                self.frames(2.0)
+                self.assertGreater(len(self.sound(since=start)) / AUDIO, 1.0)
+        self.frames(0.3)
+        start = self.clock.now
+        self.heard.clear()
+        win._set_audio_enabled(False)
+        self.frames(1.2)
+        self.assertEqual(later(start), [])
+        win._set_audio_enabled(True)
+        start = self.clock.now
+        self.frames(2.0)
+        self.assertGreater(len(self.sound(since=start)) / AUDIO, 1.0)
         win._playback.close()
+
+    def test_1x_plays_the_recording_as_it_is(self):
+        """At 1x a recording that keeps up is heard as it is: its blocks'
+        own samples, in order, not stretched. A block longer than the
+        speaker holds (8 kHz audio: half a second) is given out over the
+        frames until the next one, never more at once than the speaker
+        holds (handed over whole, AudioSink dropped the start of the next
+        block or ran dry before it, about twice a second: dsp-1)."""
+        win = self.win
+        self.open_audio(8000)
+        self.heard.clear()
+        sound = win._playback_sound
+        given = []
+        play = sound.play
+
+        def spy(block, now, last=False):
+            given.append(np.array(block, dtype=np.float32))
+            return play(block, now, last=last)
+
+        with mock.patch.object(sound, "play", side_effect=spy):
+            self.frames(3.0)
+        self.assertFalse(sound.stretching)
+        writes = [b for _t, b in self.heard if len(b)]
+        self.assertGreater(len(writes), 60)  # (frame by frame)
+        for block in writes:
+            self.assertLessEqual(len(block) / AUDIO, sound.MOST_HELD_S)
+        heard, fed = np.concatenate(writes), np.concatenate(given)
+        np.testing.assert_array_equal(heard, fed[: len(heard)])
+        self.assertGreater(len(heard), len(fed) - int(0.6 * AUDIO))
+        win._playback.close()
+
+    def test_1x_without_gaps_on_a_timer_that_varies(self):
+        """Qt's 33 ms display timer fires every 32 ms or so, a millisecond
+        either way: 8 and 11.025 kHz audio at 1x, a block every 16 or 17
+        frames (12 for 11.025 kHz), plays without a gap or a drop (it had
+        32 ms dropouts and skips about twice a second: dsp-1)."""
+        win = self.win
+        rng = np.random.default_rng(3)
+
+        def frames(seconds):
+            end = self.clock.now + seconds
+            while self.clock.now < end - 1e-9:
+                start = self.clock.now
+                win._update_display()
+                tick = 0.032 + float(rng.uniform(-0.001, 0.001))
+                self.clock.now = max(self.clock.now, start + tick)
+
+        for rate in (8000, 11025):
+            with self.subTest(rate=rate):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                self.heard.clear()
+                self.open_audio(rate)
+                frames(1.5)
+                start = self.clock.now
+                frames(5.0)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                self.assertFalse(win._playback_sound.stretching)
+                win._playback.close()
+
+    def test_an_audio_file_opened_while_the_last_sound_plays(self):
+        """An 8 kHz audio file opened while the last recording's sound
+        still plays, then another speed chosen, or back to 1x: no gap and
+        nothing dropped. (The new file's first half-second block went to
+        the speaker whole, on top of the last recording's end: AudioSink
+        dropped that end, the sound was then fed as if the speaker still
+        held it, and ran dry for about 0.1 s after the speed change.)"""
+        win = self.win
+        for speed in (2.0, 0.5):
+            with self.subTest(speed=speed):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                self.open()  # (an FM recording: its sound plays)
+                self.frames(1.5)
+                self.open_audio(8000, seconds=20.0)
+                opened = self.clock.now
+                self.frames(3.4)
+                win._playback_bar.set_speed(speed)
+                self.frames(3.0)
+                win._playback_bar.set_speed(1.0)
+                self.frames(3.0)
+                gaps, dropped = self.troubles_since(opened)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
 
     def test_record_audio_seek_pause_and_loop(self):
         """8 kHz audio at 0.5x with Record Audio on, through a seek, a

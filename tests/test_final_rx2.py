@@ -85,6 +85,18 @@ class TestATypedFrequencyFollowsTheBandPlan(_TypingCase):
         self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
         self.assertTrue(rx.message().startswith("2m Ham: listening in FM (narrow"))
 
+    def test_a_tone_squelch_chosen_stays_through_the_bands(self):
+        # (Broadcast FM isn't checked for a tone; back on the repeater the
+        # tone chosen for it is.)
+        rx = self.rx
+        rx._set_tone_choice(100.0, None)
+        self.type_frequency("97.1")
+        self.assertEqual(rx._tone_choice(), (100.0, None))
+        self.assertFalse(rx._dsp._tones_checked())
+        self.type_frequency("145.29")
+        self.assertEqual(rx._tone_choice(), (100.0, None))
+        self.assertTrue(rx._dsp._tones_checked())
+
     def test_the_main_windows_rule_for_every_kind_of_place(self):
         rx = self.rx
         self.type_frequency("118.3")  # the airband: AM

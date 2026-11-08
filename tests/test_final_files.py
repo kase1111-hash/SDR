@@ -149,6 +149,21 @@ class TestAOneChannelFileWithoutARate(_WavCase):
         self.assertEqual(chosen.center_hz, AUDIO_RATE / 4)
         self.assertAlmostEqual(chosen.duration_s, 2.0)
 
+    def test_the_receivers_rate_is_no_guess_for_it(self):
+        """(Its name giving none: asked, not the receiver's 2.4 MS/s.)"""
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        options, missing = describe_iq_file(self._tone_file("tone.wav"))
+        dialog = ImportOptionsDialog(
+            options, missing, "play", {"rate": 2.4e6, "center": 100.1e6}
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual(dialog._rate_edit.text(), "")
+        self.assertEqual(dialog._center_edit.text(), "")
+        dialog._on_accept()
+        self.assertIsNone(dialog.options())
+        self.assertEqual(dialog.check_text(), "Enter the sample rate to play the file.")
+
     def test_open_recording_plays_its_own_frequencies(self):
         path = self._tone_file()
         with self.open_dialog(path), self.warnings() as warn:

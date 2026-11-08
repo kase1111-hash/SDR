@@ -219,3 +219,39 @@ def test_a_file_that_cant_be_read_is_said_plainly(tmp_path, capsys):
         assert main(argv) == 1
         out = capsys.readouterr().out
         assert "Error: s24_le.wav can't be read: its 24-bit samples are stored" in out
+
+
+def test_a_one_channel_files_rate_is_its_own_read_as_iq_too(tmp_path, capsys):
+    """files-2 on the command line: ``--sample-rate`` of a one-channel WAV
+    file is its own rate, its samples' (twice the I/Q rate it is read at),
+    when it is read as I/Q too (Morse, ``scan --input``), as when its sound
+    is decoded as a receiver's audio (R7L-2) and as Import Options takes
+    it. There it was taken as the I/Q rate: given the file's own 8 kHz,
+    Morse at 700 Hz decoded as noise ("60 WPM IE EEIE ..."), and a file
+    whose header gives no rate was scanned around a center of 0 Hz, its
+    tone at -600 Hz. The command also says where a one-channel file's I/Q
+    is centered: --offset counts from there."""
+    from tests.wav_builders import encode, fmt_body, iq_wav, write_wav
+
+    rate = 8000
+    tone = np.real(enc.cw_baseband("CQ DE N0CALL", rate, 20, offset_hz=700.0))
+    pad = np.zeros(rate // 2)
+    x = 0.5 * np.concatenate([pad, tone, pad])
+    with_rate = tmp_path / "cw.wav"
+    iq_wav(with_rate, x, "int", 2, rate)
+    without = tmp_path / "cw_rate0.wav"
+    write_wav(without, fmt_body(1, 0, 2), encode(x, "int", 2))
+    for path in (with_rate, without):
+        argv = ["decode", "cw", "-i", str(path), "--offset", "-1300"]
+        assert main(argv + ["--sample-rate", "8000"]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out, out
+        assert f"({len(x) / rate:.3f}s at 0.004 Msps)" in out, out
+        assert (
+            "One channel: read as I/Q at half its rate, centered on 2 kHz, "
+            "which --offset counts from." in out
+        ), out
+    assert main(["scan", "--input", str(without), "--sample-rate", "8000"]) == 0
+    out = capsys.readouterr().out
+    assert "Center: 0.0020 MHz" in out, out
+    assert "     0.0007 MHz (    -1.3 kHz)" in out, out

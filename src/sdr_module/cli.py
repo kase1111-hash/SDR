@@ -635,9 +635,49 @@ def _scan_dual(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_iq_input(args: argparse.Namespace, path: Path) -> Tuple[Any, Any, bool]:
+    """``--input`` read as I/Q: (samples, metadata, whether it is a
+    one-channel WAV file). A one-channel file is read as I/Q at half its
+    rate (dsp.real_iq), so its ``--sample-rate`` is its own rate, its
+    samples', as Import Options and :func:`_audio_rate` take it: the I/Q's
+    is half of it. The metadata's rate and center are the I/Q's, with
+    ``--sample-rate`` over the file's. Raises OSError or ValueError when
+    the file can't be read."""
+    from .dsp import real_iq
+    from .dsp.recording import SampleFormat, load_iq_file
+    from .dsp.wav_file import is_wav_file, read_wav_header
+
+    sample_format = SampleFormat(args.format) if args.format else None
+    one_channel = False
+    if is_wav_file(path):
+        try:
+            one_channel = read_wav_header(path).channels == 1
+        except (OSError, ValueError):
+            pass  # (the reader says why)
+    rate = float(args.sample_rate or 0.0)
+    if one_channel:
+        rate = real_iq.iq_rate(rate)
+    samples, metadata = load_iq_file(
+        path,
+        sample_format=sample_format,
+        max_samples=args.max_samples,
+        sample_rate=rate or None,
+    )
+    return samples, metadata, one_channel
+
+
+def _hz_text(freq_hz: float) -> str:
+    """``2000 -> "2 kHz"``, ``10.7e6 -> "10.7 MHz"``."""
+    freq = float(freq_hz)
+    if abs(freq) >= 1e6:
+        return f"{freq / 1e6:.6f}".rstrip("0").rstrip(".") + " MHz"
+    if abs(freq) >= 1e3:
+        return f"{freq / 1e3:.3f}".rstrip("0").rstrip(".") + " kHz"
+    return f"{freq:.0f} Hz"
+
+
 def _scan_file(args: argparse.Namespace) -> int:
     """Detect signals in a recorded I/Q file via FFT peak detection."""
-    from .dsp.recording import SampleFormat, load_iq_file
     from .dsp.spectrum import SpectrumAnalyzer
 
     input_path = Path(args.input).expanduser()
@@ -645,16 +685,13 @@ def _scan_file(args: argparse.Namespace) -> int:
         print(f"Error: file not found: {input_path}")
         return 1
 
-    sample_format = SampleFormat(args.format) if args.format else None
     try:
-        samples, metadata = load_iq_file(
-            input_path, sample_format=sample_format, max_samples=args.max_samples
-        )
+        samples, metadata, _one_channel = _read_iq_input(args, input_path)
     except (OSError, ValueError) as exc:  # (e.g. a WAV format not read)
         print(f"Error: {input_path.name} can't be read: {exc}")
         return 1
 
-    sample_rate = args.sample_rate or metadata.sample_rate
+    sample_rate = metadata.sample_rate
     if not sample_rate:
         print("Error: sample rate unknown for this file; specify --sample-rate (Hz).")
         return 1
@@ -724,7 +761,6 @@ def cmd_decode(args: argparse.Namespace) -> int:
         format_rate,
         live_decoder_class,
     )
-    from .dsp.recording import SampleFormat, load_iq_file
 
     name = args.protocol.upper()
     input_path = Path(args.input).expanduser()
@@ -736,16 +772,13 @@ def cmd_decode(args: argparse.Namespace) -> int:
     if audio_rate:
         return _decode_audio(args, input_path, audio_rate)
 
-    sample_format = SampleFormat(args.format) if args.format else None
     try:
-        samples, metadata = load_iq_file(
-            input_path, sample_format=sample_format, max_samples=args.max_samples
-        )
+        samples, metadata, one_channel = _read_iq_input(args, input_path)
     except (OSError, ValueError) as exc:  # (e.g. a WAV format not read)
         print(f"Error: {input_path.name} can't be read: {exc}")
         return 1
 
-    sample_rate = args.sample_rate or metadata.sample_rate
+    sample_rate = metadata.sample_rate
     if not sample_rate:
         print("Error: sample rate unknown for this file; specify --sample-rate (Hz).")
         return 1
@@ -754,6 +787,13 @@ def cmd_decode(args: argparse.Namespace) -> int:
         f"Loaded {len(samples)} samples "
         f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
     )
+    if one_channel:
+        # (Its own frequencies, 0 Hz to half its rate, unless its sidecar
+        # places it: Morse at a tone's pitch is --offset from the middle.)
+        print(
+            "One channel: read as I/Q at half its rate, centered on "
+            f"{_hz_text(metadata.center_frequency)}, which --offset counts from."
+        )
 
     decoder_class = live_decoder_class(args.protocol)
     if decoder_class is None:
@@ -1317,7 +1357,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--sample-rate",
         type=float,
         default=0.0,
-        help="Sample rate in Hz for --input (overrides file metadata)",
+        help="Sample rate in Hz for --input (overrides file metadata; a "
+        "one-channel WAV file's own rate, twice the I/Q rate it is read at)",
     )
     scan_parser.add_argument(
         "--center",
@@ -1365,7 +1406,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--sample-rate",
         type=float,
         default=0.0,
-        help="Sample rate in Hz (overrides file metadata)",
+        help="Sample rate in Hz (overrides file metadata; a one-channel WAV "
+        "file's own rate, twice the I/Q rate it is read at)",
     )
     decode_parser.add_argument(
         "--max-samples",

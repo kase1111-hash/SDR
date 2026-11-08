@@ -1518,6 +1518,7 @@ def load_iq_file(
     filepath: Union[str, Path],
     sample_format: Optional[SampleFormat] = None,
     max_samples: Optional[int] = None,
+    sample_rate: Optional[float] = None,
 ) -> Tuple[np.ndarray, RecordingMetadata]:
     """
     Load entire I/Q file into memory.
@@ -1526,11 +1527,15 @@ def load_iq_file(
         filepath: Path to I/Q file
         sample_format: Sample format (auto-detect if None)
         max_samples: Maximum samples to load
+        sample_rate: The I/Q sample rate over the file's, as
+            :class:`IQPlayer` takes it (a one-channel WAV file's is half its
+            own rate; its filter and its own frequencies then follow from it
+            when nothing else gives that rate)
 
     Returns:
         Tuple of (samples, metadata)
     """
-    with IQPlayer(filepath, sample_format) as player:
+    with IQPlayer(filepath, sample_format, sample_rate) as player:
         if max_samples is None:
             max_samples = player.total_samples
 

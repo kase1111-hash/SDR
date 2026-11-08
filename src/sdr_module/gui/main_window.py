@@ -190,10 +190,9 @@ from .iq_files import (
     RecordingInfoDialog,
     ask_recording_details,
     describe_iq_file,
-    format_size,
-    needs_options,
-    split_name,
 )
+from .iq_files import format_rate as format_file_rate
+from .iq_files import format_size, needs_options, split_name
 from .level_meter import LevelMeter
 from .playback import PlaybackBar, PlaybackController, playing_line
 from .playback_sound import PlaybackSound
@@ -11597,7 +11596,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         unknown = "unknown (not stored in the file)"
         rate = options.sample_rate
         center = options.center_hz
-        rate_text = format_rate(rate) if rate else unknown
+        # (Written as Recording Info writes it: "240 kS/s", not "0.24 MS/s".)
+        rate_text = format_file_rate(rate) if rate else unknown
         if options.real_signal and rate:
             rate_text = options.rate_text  # (its I/Q's, half its own: as Info)
         center_text = format_frequency(center) if center else unknown

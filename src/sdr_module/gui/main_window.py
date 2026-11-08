@@ -10124,19 +10124,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         at another speed the speaker gets what the time-stretch holds for
         it (M-P1 with M-F2: given out only with each block, a quarter of a
         second at most, the sound of such a file ran dry most of the time
-        at 0.5x). A sound the next block would stop (the speaker off, the
-        Second Receiver's Listen) gets nothing more meanwhile."""
+        at 0.5x). A sound nobody hears any more (the speaker off, the
+        Second Receiver's Listen) ends here, as the next block would end
+        it: what the stretch holds, faded out, and nothing after it (with
+        that block, up to a second later at 0.5x, it came back for a
+        moment after it had stopped)."""
         if not self._playback.active:
             return
         sound = self._playback_sound
         now = time.monotonic()
         sound.note(0.0, now, self._playback.speed)
+        join = self._audio_join
+        if not join.playing:
+            return
         second = getattr(self, "_second_rx", None)
-        if (
-            not self._audio_enabled
-            or not self._audio_join.playing
-            or (second is not None and second.mutes_main())
-        ):
+        if not self._audio_enabled or (second is not None and second.mutes_main()):
+            if sound.stretching:
+                self._speak(np.zeros(0, dtype=np.float32), last=True)
+                join.stop()
             return
         audio = sound.more(now)
         if len(audio):

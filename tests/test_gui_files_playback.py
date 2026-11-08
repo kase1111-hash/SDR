@@ -137,6 +137,52 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
         self.assertLess(model.gaps, 0.01)
         win._playback.close()
 
+    def test_its_sound_ends_at_once_when_this_receiver_isnt_heard(self):
+        """The Second Receiver's Listen playing only that one, or the Audio
+        switched off, between two blocks of 8 kHz audio at 0.5x (a block a
+        second): the sound's end (what the stretch holds, faded out) comes
+        at once, and nothing after it, neither the sound between blocks
+        nor its end again with the next block (a quarter of a second of
+        this receiver, up to a second after its sound had stopped, over
+        the Second Receiver's). Heard again, it plays on."""
+        win = self.win
+        self.open_audio(8000)
+        win._playback_bar.set_speed(0.5)
+        self.frames(2.0)
+
+        def later(start):
+            """What the speaker got after the frame at ``start``."""
+            return [
+                (round(t - start, 3), round(len(b) / AUDIO, 3))
+                for t, b in self.heard
+                if len(b) and t >= start + 0.03
+            ]
+
+        for phase in (0.0, 0.3, 0.6):  # (somewhere between two blocks)
+            with self.subTest(phase=phase):
+                self.frames(phase)
+                self.assertTrue(win._playback_sound.stretching)
+                with mock.patch.object(win._second_rx, "mutes_main", return_value=True):
+                    start = self.clock.now
+                    self.heard.clear()
+                    self.frames(2.2)  # (two blocks come)
+                    self.assertEqual(later(start), [])
+                    self.assertLess(len(self.sound()) / AUDIO, 0.15)
+                start = self.clock.now
+                self.frames(2.0)
+                self.assertGreater(len(self.sound(since=start)) / AUDIO, 1.0)
+        self.frames(0.3)
+        start = self.clock.now
+        self.heard.clear()
+        win._set_audio_enabled(False)
+        self.frames(2.2)
+        self.assertEqual(later(start), [])
+        win._set_audio_enabled(True)
+        start = self.clock.now
+        self.frames(2.0)
+        self.assertGreater(len(self.sound(since=start)) / AUDIO, 1.0)
+        win._playback.close()
+
     def test_1x_still_passes_the_blocks_as_they_are(self):
         """(At 1x a recording that keeps up is heard as it is: the
         frames between its blocks add nothing.)"""

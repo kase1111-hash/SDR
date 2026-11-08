@@ -9,22 +9,26 @@ The Second Receiver's listening options, as the main window has them.
 * **Notch** and **Low cut**: the receiver chain's own listening filters
   (``audio_chain.ListeningFilters``, set through the receiver's
   ``AudioOptions``): the Notch (Off, Auto, Manual at a frequency), the
-  Whistle row under it (Manual's frequency, or the whistle Auto removes)
-  and the Low cut (Off, 100, 200, 300 Hz), greyed with the reason where
-  they don't apply (:func:`notch_unused`, :func:`low_cut_unused`), as in
-  the main window's Audio group.
+  Whistle row under it (Manual's frequency, or every whistle Auto removes:
+  :func:`notch_found_text`) and the Low cut (Off, 100, 200, 300 Hz),
+  greyed with the reason where they don't apply (:func:`notch_unused`,
+  :func:`low_cut_unused`), as in the main window's Audio group.
 * **Tone squelch**: the main window's choices (Off, the 50 CTCSS tones,
-  the 104 DCS codes in normal then inverted polarity: :func:`tone_choices`)
-  and its Tone heard readout (:func:`tone_heard_text`), through the same
-  ``audio_chain.ToneSquelch``, in narrow FM only.
+  the 104 DCS codes in normal then inverted polarity: :func:`tone_choices`),
+  its Reverse switch (CHIRP's TSQL-R and DTCS-R: the stations sending the
+  tone or code muted) and its Tone heard readout (:func:`tone_heard_text`),
+  through the same ``audio_chain.ToneSquelch``, in narrow FM only.
+
+De-emphasis, Stereo Blend and Squelch Tail Elimination are the main
+window's, for both receivers (``SecondReceiverWindow.follow_main_audio``).
 
 What is decided here is Qt-free: the Second Receiver's DSP runs on a worker
 thread (``second_receiver.FrameWork``), which hands the lamp's reading, the
-whistle Auto found and the tone heard back to the window with each frame.
+whistles Auto found and the tone heard back to the window with each frame.
 :class:`ListeningRows` (Qt) is a part of the Second Receiver window: its
 rows in the Squelch and audio group, what they set on its DSP, and their
 settings (``device/second_receiver/notch``, ``notch_hz``, ``low_cut``,
-``tone_squelch``, ``dcs_squelch``).
+``tone_squelch``, ``dcs_squelch``, ``tone_reverse``).
 """
 
 from __future__ import annotations
@@ -39,13 +43,19 @@ from .audio_chain import (
     LOW_CUT_CHOICES,
     NOTCH_CHOICES,
     NOTCH_RANGE_HZ,
+    REVERSE_TONE_TIP,
 )
+
+# (The main window's Audio group reads its readout's frequencies so.)
+from .control_panel import _frequencies
 
 # The main window's thresholds: STEREO lights at half the stereo
 # difference or more (about 10 dB of separation) and goes out below a
-# third of it (no flicker while the blend hovers).
+# third of it (no flicker while the blend hovers); below
+# _NEARLY_MONO_BLEND what plays is mono.
 from .main_window import (
     _BROADCAST_DEVIATION_HZ,
+    _NEARLY_MONO_BLEND,
     _STEREO_OFF_BLEND,
     _STEREO_ON_BLEND,
 )
@@ -53,6 +63,7 @@ from .main_window import (
 try:
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import (
+        QCheckBox,
         QHBoxLayout,
         QLabel,
         QSizePolicy,
@@ -111,7 +122,9 @@ def stereo_reading(
     follows the audio, else None), ``lit`` (the lamp said STEREO for the
     last block: it goes out only below a third of the stereo difference).
     ``switch`` names the switch that turns stereo off. The wording is the
-    main window's badge's (``SDRMainWindow._show_stereo``)."""
+    main window's badge's (``SDRMainWindow._show_stereo``), naming the
+    Stereo Blend a blended or mono station is heard with: the main
+    window's, which this receiver follows (``decoder.blending``)."""
     if not received:
         return NO_STEREO_READING
     if not enabled:
@@ -126,13 +139,15 @@ def stereo_reading(
     if decoder is None:
         return "MONO", None, "Mono: listening for the station's stereo pilot."
     blend = float(decoder.blend)
+    blending = str(getattr(decoder, "blending", "") or "normal")
+    setting = f"the main window's Radio > Audio > Stereo Blend: {blending.capitalize()}"
     if blend >= _STEREO_ON_BLEND or (lit and blend >= _STEREO_OFF_BLEND):
         how = (
             "Stereo: the station's 19 kHz pilot is locked and left and right "
             "are fully apart."
             if blend >= 0.95
             else "Stereo, blended partly toward mono to keep the hiss down: the "
-            "signal is a little weak."
+            f"signal is a little weak ({setting})."
         )
         return (
             "STEREO",
@@ -148,11 +163,19 @@ def stereo_reading(
         )
     if float(decoder.target) >= _STEREO_ON_BLEND:
         return "MONO", None, "Mono for a moment: stereo is coming in."
+    # (Under half the stereo difference: MONO, but said so when some of it
+    # still plays, as the main window's badge does.)
+    heard = (
+        "Nearly mono: the signal is too weak for clean stereo, so it is "
+        "blended most of the way toward mono"
+        if blend > _NEARLY_MONO_BLEND
+        else "Mono: the signal is too weak for clean stereo, so it plays in mono"
+    )
     return (
         "MONO",
         None,
-        "Mono: the signal is too weak for clean stereo, so it plays in mono to "
-        "keep the hiss down. Stereo comes back as the signal gets stronger.",
+        f"{heard} to keep the hiss down ({setting}). Stereo comes back as the "
+        "signal gets stronger.",
     )
 
 
@@ -160,12 +183,13 @@ def stereo_reading(
 # Notch and low cut (the main window's Audio group's rules and wording)
 # ---------------------------------------------------------------------------
 
-#: The Notch's and the Low cut's tooltips where they apply.
+#: The Notch's and the Low cut's tooltips where they apply (the main
+#: window's Audio group's: Auto removes up to three whistles, M-A3).
 NOTCH_TIP = (
-    "Removes a whistle (a heterodyne) from the audio. Auto finds the "
-    "strongest steady one and follows it as it drifts, leaving voice alone "
-    "(for music use Off: a held note counts as a whistle); Manual removes "
-    "the frequency you set (AM, SSB, CW and narrow FM)."
+    "Removes whistles (heterodynes) from the audio. Auto finds up to three "
+    "steady ones, the strongest first, and follows each as it drifts, leaving "
+    "voice alone (for music use Off: a held note counts as a whistle); Manual "
+    "removes the frequency you set (AM, SSB, CW and narrow FM)."
 )
 LOW_CUT_TIP = (
     "Cuts the audio below this frequency: mains hum and rumble out, the "
@@ -195,17 +219,35 @@ def low_cut_unused(mode: str, deviation_hz: float) -> str:
     return notch_unused(mode, deviation_hz)
 
 
-def notch_found_text(hz: Optional[float]) -> Tuple[str, str, str]:
-    """Auto's readout, ``(text, tooltip, tone)``: the whistle it removes
-    (Hz), or None."""
-    if hz is None:
+def notch_found_text(found: Any) -> Tuple[str, str, str]:
+    """Auto's readout, ``(text, tooltip, tone)``: what it removes, a
+    whistle's frequency (Hz), several (a sequence, the strongest first: up
+    to three) or None, in the main window's wording
+    (``ControlPanel.show_notch_found``): several in order of frequency, so
+    the row doesn't jump about when two are about as loud, the strongest
+    first in the tooltip."""
+    whistles = _frequencies(found)
+    if not whistles:
         return (
             "None",
             "Auto hears no steady whistle on the channel: the audio plays as "
-            "it is. It finds one within about half a second.",
+            "it is. It finds one within about half a second, and removes up to "
+            "three at once.",
             "muted",
         )
-    return f"{hz:.0f} Hz", f"Auto removes a steady whistle at {hz:.1f} Hz", "success"
+    if len(whistles) == 1:
+        hz = whistles[0]
+        return (
+            f"{hz:.0f} Hz",
+            f"Auto removes a steady whistle at {hz:.1f} Hz",
+            "success",
+        )
+    text = ", ".join(f"{hz:.0f}" for hz in sorted(whistles)) + " Hz"
+    tip = (
+        f"Auto removes {len(whistles)} steady whistles, the strongest first: "
+        + ", ".join(f"{hz:.1f} Hz" for hz in whistles)
+    )
+    return text, tip, "success"
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +263,9 @@ ToneHeard = Tuple[Optional[float], Optional[Tuple[int, bool]], bool]
 TONE_SQUELCH_TIP = (
     "Tone squelch: only play stations that send this sub-audible CTCSS tone "
     "or DCS code (repeaters, PMR); the tone or the code's bits are filtered "
-    "out of what you hear. Tone heard shows the one on the channel."
+    "out of what you hear. Tone heard shows the one on the channel. Squelch "
+    "Tail Elimination (closing at a CTCSS station's reverse burst) is the "
+    "main window's, for both receivers: Radio > Audio there."
 )
 TONE_SQUELCH_UNUSED = "Only used in FM mode"
 
@@ -269,12 +313,17 @@ def parse_tone_choice(
 
 
 def tone_heard_text(
-    freq: Optional[float], checked: bool = True, dcs: Optional[Tuple[int, bool]] = None
+    freq: Optional[float],
+    checked: bool = True,
+    dcs: Optional[Tuple[int, bool]] = None,
+    muted: bool = False,
 ) -> Tuple[str, str, str]:
     """Tone heard, ``(text, tooltip, tone)``: the sub-audible tone (or DCS
     code) on the channel, None for none, ``checked`` False where tones
-    aren't looked for (a broadcast deviation). The main window's wording
-    (``ControlPanel.set_detected_tone``)."""
+    aren't looked for (a broadcast deviation); ``muted``: the one heard is
+    the one a reverse tone squelch mutes (said, in the warning tone). The
+    main window's wording (``ControlPanel.set_detected_tone``)."""
+    mutes = ". The reverse tone squelch mutes it."
     if checked and dcs is not None:
         code, inverted = dcs
         tip = (
@@ -284,6 +333,8 @@ def tone_heard_text(
         twin = dcs_same_signal(code, inverted)
         if twin is not None:
             tip += f": the same signal as {dcs_label(*twin)}"
+        if muted:
+            return dcs_label(code, inverted), tip + mutes, "warning"
         return dcs_label(code, inverted), tip, "success"
     if not checked:
         return (
@@ -302,15 +353,18 @@ def tone_heard_text(
             "muted",
         )
     label = ctcss_label(freq)
-    return label, f"The station sends a {label} CTCSS tone", "success"
+    tip = f"The station sends a {label} CTCSS tone"
+    if muted:
+        return label, tip + mutes, "warning"
+    return label, tip, "success"
 
 
 if HAS_PYQT6:
 
     class ListeningRows:
         """Part of the Second Receiver window (a mixin of
-        ``SecondReceiverWindow``): the Tone squelch, Tone heard, Notch,
-        Whistle and Low cut rows of its Squelch and audio group, what they
+        ``SecondReceiverWindow``): the Tone squelch, Reverse, Tone heard,
+        Notch, Whistle and Low cut rows of its Squelch and audio group, what they
         set on its DSP (``self._dsp.options``, read by the receiver chain
         on every block, and ``self._dsp.tone_squelch``: a change takes
         effect at once, without a click), and their settings. Uses the
@@ -319,7 +373,8 @@ if HAS_PYQT6:
         ``_deviation_hz()``."""
 
         def _build_tone_rows(self, form: Any) -> None:
-            """The Tone squelch and Tone heard rows, added to ``form``."""
+            """The Tone squelch, Reverse and Tone heard rows, added to
+            ``form``."""
             self._tone_form = form
             combo = self._combo(6)
             for choice in tone_choices():
@@ -333,15 +388,26 @@ if HAS_PYQT6:
                         combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
                     )
             combo.setAccessibleName("Second receiver's tone squelch")
-            combo.currentIndexChanged.connect(self._on_tone_changed)
             self._tone_combo = combo
             label = QLabel("Tone squelch:")
             label.setBuddy(combo)
             form.addRow(label, combo)
+            # (M-Q3) Reversed, as the main window's Audio group has it: the
+            # stations sending the tone or code are muted, every other one
+            # plays (CHIRP's TSQL-R and DTCS-R).
+            self._tone_reverse_check = QCheckBox("Reverse: mute this tone")
+            self._tone_reverse_check.setAccessibleName(
+                "Second receiver's reverse tone squelch"
+            )
+            self._quiet_reverse = False  # (a bookmark's own message says it)
+            form.addRow("", self._tone_reverse_check)
+            combo.currentIndexChanged.connect(self._on_tone_changed)
+            self._tone_reverse_check.toggled.connect(self._on_tone_reverse_toggled)
             # The tone (or code) the station sends (FM only).
             self._tone_heard = QLabel()
             self._tone_heard.setAccessibleName("Tone the second receiver hears")
             form.addRow(QLabel("Tone heard:"), self._tone_heard)
+            self._update_tone_reverse()
             self._show_tone_heard(None, True, None)
 
         def _tone_choice(
@@ -350,17 +416,53 @@ if HAS_PYQT6:
             """The Tone squelch's ``(CTCSS tone, DCS code)``."""
             return parse_tone_choice(self._tone_combo.currentData())
 
+        def _apply_tone(self) -> None:
+            """The tone squelch chosen, reversed or not, to the DSP: one
+            value its worker takes up at the next block (Reverse ticked with
+            no tone or code chosen reverses nothing)."""
+            tone, dcs = self._tone_choice()
+            chosen = tone is not None or dcs is not None
+            reverse = chosen and self._tone_reverse_check.isChecked()
+            dsp = self._dsp
+            dsp.tone_squelch = (tone, dcs, True) if reverse else (tone, dcs)
+            dsp.options.tone_squelch = chosen
+            self._update_tone_reverse()
+
         def _on_tone_changed(self, *_args: Any) -> None:
             tone, dcs = self._tone_choice()
-            dsp = self._dsp
-            # (One value the DSP worker takes up at its next block.)
-            dsp.tone_squelch = (tone, dcs)
-            dsp.options.tone_squelch = tone is not None or dcs is not None
+            self._apply_tone()
             self._save(KEY + "tone_squelch", float(tone or 0.0))
             self._save(KEY + "dcs_squelch", format_dcs(*dcs) if dcs else "")
+            self._say_tone_unused()
+
+        def _on_tone_reverse_toggled(self, on: bool) -> None:
+            """Reverse ticked or not: applied at once, saved, and said (as
+            the main window says it), unless a bookmark's own message
+            does."""
+            self._apply_tone()
+            self._save(KEY + "tone_reverse", bool(on))
+            tone, dcs = self._tone_choice()
+            if self._restoring or self._quiet_reverse:
+                return
+            if tone is None and dcs is None:
+                return
+            what = dcs_label(*dcs) if dcs is not None else f"the {tone:.1f} Hz tone"
+            if on:
+                text = (
+                    f"Reverse tone squelch: stations sending {what} are muted, "
+                    "every other station plays."
+                )
+            else:
+                text = f"Tone squelch: only stations sending {what} play."
+            self._show_message(text, "info", 4000)
+            self._say_tone_unused()
+
+        def _say_tone_unused(self) -> None:
+            """A tone or code chosen at a broadcast deviation: say it isn't
+            used there."""
             deviation = self._deviation_hz()
             if (
-                dsp.options.tone_squelch
+                self._dsp.options.tone_squelch
                 and not self._restoring
                 and self.mode() == "FM"
                 and deviation >= _BROADCAST_DEVIATION_HZ
@@ -373,11 +475,39 @@ if HAS_PYQT6:
                     6000,
                 )
 
+        def _update_tone_reverse(self) -> None:
+            """Reverse applies to a tone or code chosen, in FM (the main
+            window's Audio group's rules and wording)."""
+            check = self._tone_reverse_check
+            tone, dcs = self._tone_choice()
+            chosen = tone is not None or dcs is not None
+            fm = self.mode() == "FM"
+            check.setText(
+                "Reverse: mute this code"
+                if dcs is not None
+                else "Reverse: mute this tone"
+            )
+            check.setEnabled(fm and chosen)
+            if not fm:
+                tip = TONE_SQUELCH_UNUSED
+            elif not chosen:
+                tip = (
+                    "Choose a CTCSS tone or DCS code in Tone squelch first: Reverse "
+                    "mutes the stations that send it."
+                )
+            else:
+                tip = REVERSE_TONE_TIP
+            check.setToolTip(tip)
+
         def _set_tone_choice(
-            self, tone: Optional[float], dcs: Optional[Tuple[int, bool]]
+            self,
+            tone: Optional[float],
+            dcs: Optional[Tuple[int, bool]],
+            reverse: Optional[bool] = None,
         ) -> None:
             """Choose a CTCSS tone or a DCS code (one not in the list, or
-            neither: Off)."""
+            neither: Off), and (``reverse`` not None) whether it is
+            reversed, without saying so (the caller does)."""
             combo = self._tone_combo
             if dcs is not None:
                 index = combo.findData(format_dcs(*dcs))
@@ -386,6 +516,12 @@ if HAS_PYQT6:
             else:
                 index = 0
             combo.setCurrentIndex(max(index, 0))
+            if reverse is not None:
+                self._quiet_reverse = True
+                try:
+                    self._tone_reverse_check.setChecked(bool(reverse))
+                finally:
+                    self._quiet_reverse = False
 
         def _show_tone_heard(
             self,
@@ -394,13 +530,24 @@ if HAS_PYQT6:
             dcs: Optional[Tuple[int, bool]],
         ) -> None:
             """Tone heard (refreshed every frame: nothing is touched unless
-            it changed)."""
-            text, tip, tone = tone_heard_text(freq, checked, dcs)
+            it changed); the one a reverse tone squelch mutes is said so,
+            in the warning tone, as in the main window."""
+            muted = False
+            if checked and self._tone_reverse_check.isChecked():
+                tone, chosen = self._tone_choice()
+                if dcs is not None:
+                    muted = chosen is not None and chosen in (
+                        dcs,
+                        dcs_same_signal(*dcs),
+                    )
+                elif freq is not None and tone is not None:
+                    muted = abs(tone - float(freq)) < 0.05
+            text, tip, tone_name = tone_heard_text(freq, checked, dcs, muted)
             label = self._tone_heard
             if label.text() != text or label.toolTip() != tip:
                 label.setText(text)
                 label.setToolTip(tip)
-                set_tone(label, tone)
+                set_tone(label, tone_name)
 
         def _show_no_tone_heard(self) -> None:
             """Nothing is received (stopped): Tone heard says None in narrow
@@ -453,6 +600,7 @@ if HAS_PYQT6:
             label.setBuddy(self._notch_spin)
             form.addRow(label, notch_row)
             self._notch_row = notch_row
+            self._notch_label = label  # ("Whistles:" for several)
             form.setRowVisible(notch_row, False)  # (Off)
             self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
             self._notch_spin.valueChanged.connect(self._on_notch_changed)
@@ -504,6 +652,8 @@ if HAS_PYQT6:
                 TONE_SQUELCH_TIP if is_fm else TONE_SQUELCH_UNUSED
             )
             self._tone_form.setRowVisible(self._tone_heard, is_fm)
+            self._tone_form.setRowVisible(self._tone_reverse_check, is_fm)
+            self._update_tone_reverse()
             if not self._running:
                 self._show_no_tone_heard()  # (frames say it while running)
             why = notch_unused(mode, deviation)
@@ -522,21 +672,32 @@ if HAS_PYQT6:
             self._low_cut_combo.setEnabled(not why)
             self._low_cut_combo.setToolTip(why or LOW_CUT_TIP)
 
-        def _show_notch_found(self, hz: Optional[float]) -> None:
-            """The Whistle row's readout in Auto (refreshed every frame:
-            nothing is touched unless it changed)."""
-            text, tip, tone = notch_found_text(hz)
+        def _show_notch_found(self, found: Any) -> None:
+            """The Whistle row's readout in Auto: every whistle it removes
+            (a frame's ``notches``, the strongest first; one frequency or
+            None also do). Refreshed every frame: nothing is touched unless
+            it changed."""
+            text, tip, tone = notch_found_text(found)
             label = self._notch_found
             if label.text() != text or label.toolTip() != tip:
                 label.setText(text)
                 label.setToolTip(tip)
                 set_tone(label, tone)
+            caption = "Whistles:" if len(_frequencies(found)) > 1 else "Whistle:"
+            if self._notch_label.text() != caption:
+                self._notch_label.setText(caption)
 
         def _restore_filters(self) -> None:
-            """The saved tone squelch, Notch, its frequency and the Low cut,
-            each on its own: a damaged value is logged and gives Off (the
-            frequency: its box's nearest end), never stopping the others."""
+            """The saved tone squelch (and whether it is reversed), Notch,
+            its frequency and the Low cut, each on its own: a damaged value
+            is logged and gives Off (the frequency: its box's nearest end),
+            never stopping the others."""
             s = self._settings
+            # (A damaged value is logged by the settings and read as off.)
+            reverse = s.get_bool(KEY + "tone_reverse", False)
+            self._tone_reverse_check.blockSignals(True)
+            self._tone_reverse_check.setChecked(reverse)
+            self._tone_reverse_check.blockSignals(False)
             tone = s.get_float(KEY + "tone_squelch", 0.0)
             index = self._tone_combo.findData(f"{tone:.1f}") if tone else 0
             if index < 0:

@@ -3835,7 +3835,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             audio_menu,
             "S&quelch Tail Elimination",
             self._set_tail_elimination,
-            tip=TAIL_ELIMINATION_TIP,
+            tip=f"{TAIL_ELIMINATION_TIP} The Second Receiver uses it too.",
             checkable=True,
             checked=self._tail_elimination,
         )
@@ -4093,7 +4093,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._set_stereo_enabled,
             tip="Play broadcast FM in stereo where the station sends it (a "
             "weak or noisy signal blends toward mono by itself, to keep the "
-            "hiss down). Off: always mono.",
+            "hiss down). Off: always mono. (This window's: the Second Receiver "
+            "has its own Stereo switch.)",
             checkable=True,
             checked=self._stereo_enabled,
         )
@@ -4105,7 +4106,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._set_stereo_blend,
             "How far a weak or noisy broadcast FM station blends toward mono "
             "to keep its hiss down: less (more stereo, more hiss) or more "
-            "(quieter weak stations)",
+            "(quieter weak stations). The Second Receiver uses it too.",
         )
         self._deemphasis_actions = self._add_choice_menu(
             audio_menu,
@@ -4116,7 +4117,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "How much of broadcast FM's treble is cut back, as the station "
             "lifted it: 75 µs in the Americas and South Korea, 50 µs in "
             "Europe, Australia and most of the world (mono and stereo; other "
-            "modes have none)",
+            "modes have none). The Second Receiver uses it too.",
         )
         self._add_listening_menus(radio_menu, audio_menu)
         radio_menu.addSeparator()
@@ -7469,7 +7470,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         squelch tail (M-Q2), as heard and for Scan Bookmarks, which judges
         a channel by the same tone squelch. Saved at once. A DCS code's
         turn-off code closes it either way (part of the DCS standard, and no
-        voice was heard to fake it)."""
+        voice was heard to fake it). The Second Receiver follows it."""
         on = bool(on)
         action = getattr(self, "_tail_elimination_action", None)
         if action is not None and action.isChecked() != on:
@@ -7481,6 +7482,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tail_elimination = on
         self._tone_squelch.tail_elimination = on
         self._settings.set(_TAIL_ELIMINATION_KEY, on)
+        self._second_rx_follows_audio()
         self._show_status_message(
             (
                 "Squelch tail elimination on: a CTCSS station's reverse burst "
@@ -10311,7 +10313,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Korea) or 50 µs (Europe, Australia, most of the world). Saved at
         once; broadcast FM takes it on the next block (its audio filters
         crossfade in 10 ms: no click), mono and stereo alike, and with it
-        Record Audio and the radio tuner's station."""
+        Record Audio, the radio tuner's station and the Second Receiver."""
         key = str(key).strip()  # (as a choice's key: "75" or "50")
         seconds = deemphasis_seconds(key)
         if seconds is None:
@@ -10322,6 +10324,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._deemphasis_choice = key
         self._audio_options.deemphasis_s = seconds
         self._settings.set(_DEEMPHASIS_KEY, key)
+        self._second_rx_follows_audio()
         self._show_status_message(
             deemphasis_note(key), "info", 4000, log=False  # (what was asked)
         )
@@ -10329,7 +10332,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _set_stereo_blend(self, key: str) -> None:
         """Radio > Audio > Stereo Blend (M-A2): how far a weak station
         blends toward mono, Less, Normal or More. Saved at once; the stereo
-        decoder's thresholds move to it over 20 ms."""
+        decoder's thresholds move to it over 20 ms (the Second Receiver's
+        too)."""
         key = str(key).strip().lower()  # (as a choice's key)
         if usable_blend(key) != key:
             return
@@ -10339,9 +10343,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._stereo_blend_choice = key
         self._audio_options.stereo_blend = key
         self._settings.set(_STEREO_BLEND_KEY, key)
+        self._second_rx_follows_audio()
         self._show_status_message(
             stereo_blend_note(key), "info", 4000, log=False  # (what was asked)
         )
+
+    def _second_rx_follows_audio(self) -> None:
+        """De-emphasis, Stereo Blend and Squelch Tail Elimination are for
+        both receivers: the Second Receiver (if opened) takes the change up
+        (it takes them up when it opens)."""
+        second = getattr(self, "_second_rx", None)
+        if second is not None:
+            second.follow_audio()
 
     def _show_stereo(self, chain: Optional["_ReceiverChain"], received: bool) -> None:
         """The receiver bar's STEREO / MONO badge and the radio tuner's

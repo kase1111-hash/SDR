@@ -347,9 +347,12 @@ class TestAutoSaysWhatItRemoves(_SecondCase):
         for start in range(0, len(iq), block):
             rx._process(iq[start : start + block])
         found = rx._notch_found
-        self.assertRegex(found.text(), r"^13(49|50|51) Hz$")
+        # (Since the merge Auto removes up to three steady whistles, the
+        # 700 Hz tone too, and the row names both: by frequency, the
+        # strongest first in its tooltip.)
+        self.assertRegex(found.text(), r"^(699|700|701), 13(49|50|51) Hz$")
         self.assertEqual(found.property("tone"), "success")
-        self.assertIn("1350", found.toolTip())
+        self.assertRegex(found.toolTip(), r"strongest first: 13(49|50|51)\.\d Hz, ")
         # A drift within the same whole hertz: the tooltip's tenth follows
         # (review: it kept the first one's).
         rx._show_notch_found(1350.04)

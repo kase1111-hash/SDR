@@ -31,6 +31,8 @@ from ..dsp.live_decoders import (
     describe_message,
     format_rate,
     live_decoder_class,
+    skipped_text,
+    skipped_tip,
 )
 from .decoder_panel import (
     _FRESH_S,
@@ -81,6 +83,10 @@ PROTOCOL_OFF = "Off"
 PROTOCOLS: Tuple[str, ...] = (PROTOCOL_OFF,) + tuple(LIVE_DECODERS)
 #: How the Decoder tab marks this receiver's rows ("2nd RX · POCSAG").
 RECEIVER_MARK = "2nd RX"
+#: Where this window's sample rate is chosen (what helps a busy sky).
+RATE_PLACE = "Sample rate (this window's Device group)"
+#: The last message's row before the first one comes (and after Clear).
+NO_MESSAGE_YET = "No message yet"
 
 #: (frames, valid, failed) of a decoder's status.
 _Counts = Tuple[int, int, int]
@@ -193,6 +199,18 @@ class ReceiverDecoding:
         return decoder.status if decoder is not None else None
 
 
+def busy_sky(status: Any) -> Optional[Tuple[str, str]]:
+    """``(line, tooltip)`` while the ADS-B decoder leaves replies unread in
+    a very busy sky (``LiveDecoderStatus.skipped_per_s``), else None: the
+    Decoder tab's words, what helps naming this window's Sample rate list."""
+    per_s = getattr(status, "skipped_per_s", 0.0) or 0.0
+    rate = float(getattr(status, "sample_rate", 0.0) or 0.0)
+    text = skipped_text(per_s, rate)
+    if not text:
+        return None
+    return text, skipped_tip(per_s, rate, where=RATE_PLACE)
+
+
 def decoder_line(
     protocol: str,
     status: Any,
@@ -249,6 +267,11 @@ def decoder_line(
         f"Since the decoder started (or Clear): {_plural(frames, 'frame')} "
         f"heard, {valid:,} decoded, {failed:,} failed their checks."
     )
+    busy = busy_sky(status)
+    if busy:
+        # ADS-B in a very busy sky leaves replies unread (M-D2): said while
+        # it lasts, as the Decoder tab does; the counts are in the tooltip.
+        return busy[0], "info", f"{busy[1]}\n\n{tip}"
     undecoded = float(getattr(status, "undecoded_signal_s", 0.0) or 0.0)
     if undecoded >= _UNDECODED_SIGNAL_S:
         return (
@@ -355,7 +378,8 @@ if HAS_PYQT6:
             self._decoder_line.setAccessibleName("Second receiver's decoder status")
             form.addRow(self._decoder_line)
             # The last message, on one line (the whole of it in its
-            # tooltip and in the Decoder tab).
+            # tooltip and in the Decoder tab): hidden with Protocol Off, "No
+            # message yet" until the first (_show_last_message).
             self._decoder_last = _ElidedLabel("")
             set_role(self._decoder_last, "value")
             self._decoder_last.setAccessibleName(
@@ -373,8 +397,24 @@ if HAS_PYQT6:
             )
             form.addRow(self._decoder_show)
             self._decoder_form = form
+            self._show_last_message()
             self._update_decoder_line()
             return group
+
+        def _show_last_message(self, text: str = "") -> None:
+            """The last message's row: hidden with Protocol Off (no message
+            can come), "No message yet" until the first one comes (the row
+            keeps its place, so neither the group nor Show in Decoder Tab
+            moves when it does), then the message, whole in its tooltip."""
+            label = self._decoder_last
+            self._decoder_form.setRowVisible(
+                label, self._decoder_protocol() != PROTOCOL_OFF
+            )
+            shown = text or NO_MESSAGE_YET
+            if label.text() != shown:
+                label.setText(shown)
+            label.setToolTip(text)
+            set_tone(label, None if text else "muted")
 
         # -------------------------------------------------------- choosing
 
@@ -415,8 +455,7 @@ if HAS_PYQT6:
             self._decoded_at = None
             self._decoder_base = (0, 0, 0)
             self._decoder_status = decoding.status()
-            self._decoder_last.setText("")
-            self._decoder_last.setToolTip("")
+            self._show_last_message()
             self._say_decoder_problem()
             self._update_decoder_line()
 
@@ -490,9 +529,7 @@ if HAS_PYQT6:
                     continue
                 self._decoded_rows += 1
                 self._decoded_at = time.monotonic()
-                text = last_message_text(msg)
-                self._decoder_last.setText(text)
-                self._decoder_last.setToolTip(text)
+                self._show_last_message(last_message_text(msg))
             self._update_decoder_line()
 
         def _show_decoded(self, result: Any) -> None:
@@ -527,8 +564,7 @@ if HAS_PYQT6:
             )
             self._decoded_rows = 0
             self._decoded_at = None
-            self._decoder_last.setText("")
-            self._decoder_last.setToolTip("")
+            self._show_last_message()
             self._update_decoder_line()
 
         def _update_decoder_line(self) -> None:

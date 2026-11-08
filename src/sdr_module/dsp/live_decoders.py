@@ -204,8 +204,19 @@ def skipped_text(per_s: float, sample_rate: float, recording: bool = False) -> s
     return text + " 2.56 MS/s or more reads every one."
 
 
-def skipped_tip(per_s: float, sample_rate: float, recording: bool = False) -> str:
-    """The longer story behind :func:`skipped_text` (a tooltip)."""
+#: Where the main window's sample rate is chosen (:func:`skipped_tip`).
+SAMPLE_RATE_PLACE = "Receiver > Sample rate (or click the rate in the status bar)"
+
+
+def skipped_tip(
+    per_s: float,
+    sample_rate: float,
+    recording: bool = False,
+    where: str = SAMPLE_RATE_PLACE,
+) -> str:
+    """The longer story behind :func:`skipped_text` (a tooltip); ``where``
+    names the control that sets the rate (the Second Receiver has its
+    own)."""
     rate = format_rate(sample_rate)
     tip = (
         f"Below 2.5 MS/s the ADS-B decoder reads only so many replies a second, "
@@ -220,7 +231,7 @@ def skipped_tip(per_s: float, sample_rate: float, recording: bool = False) -> st
         return tip + " A recording made at 2.56 MS/s or more is read in full."
     return tip + (
         " From 2.5 MS/s there is no such limit: choose 2.56 MS/s or more in "
-        "Receiver > Sample rate (or click the rate in the status bar)."
+        f"{where}."
     )
 
 

@@ -294,7 +294,9 @@ class TestTheDecoderTab(_DecodeCase):
         self.run_seconds(2.5)
         self.assertTrue(rx._decoder_last.text())
         self.panel.clear()
-        self.assertEqual(rx._decoder_last.text(), "")
+        # (Gone; the row says none has come since: it keeps its place.)
+        self.assertEqual(rx._decoder_last.text(), "No message yet")
+        self.assertEqual(rx._decoder_last.toolTip(), "")
         self.assertNotIn("1 packet", rx._decoder_line.text())
 
 

@@ -1438,6 +1438,14 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._live_speed = (str(wpm_text or ""), bool(receiving))
         self._show_speed()
 
+    def stop_receiving(self) -> None:
+        """Nothing is received live now (the receiver stopped, or its
+        decoder isn't Morse any more): "Receiving" goes, the speed last
+        read and the text stay. Cheap when it says nothing already."""
+        wpm_text, receiving = self._live_speed
+        if receiving:
+            self.set_speed(wpm_text, False)
+
     def _show_speed(self) -> None:
         record = self._list(self._shown)
         if record is None:

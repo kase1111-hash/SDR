@@ -123,8 +123,8 @@ class _Found:
     """What a look through a WAV file's chunks found."""
 
     container: str
-    #: (format tag, channels, frame rate, bits per sample).
-    fmt: Tuple[int, int, int, int]
+    #: (format tag, channels, frame rate, bits per sample, block align).
+    fmt: Tuple[int, int, int, int, int]
     data_offset: int
     #: The data's size as the file says it (None: unknown, to the end).
     declared: Optional[int]
@@ -161,7 +161,9 @@ def read_wav_header(source: Source) -> WavHeader:
 
     Raises WavError (a ValueError) for a file that isn't WAV or whose
     samples are in a form not read (:data:`READ_WIDTHS`: e.g. compressed,
-    or 64-bit integers), saying which, and OSError when it can't be read.
+    or 64-bit integers; or in words wider than their bits, whose block
+    align says so: 24-bit samples in 32-bit words), saying which, and
+    OSError when it can't be read.
     """
     handle, own = _opened(source)
     try:
@@ -169,7 +171,7 @@ def read_wav_header(source: Source) -> WavHeader:
     finally:
         if own:
             handle.close()
-    tag, channels, rate, bits = found.fmt
+    tag, channels, rate, bits, align = found.fmt
     if tag not in (WAVE_FORMAT_PCM, WAVE_FORMAT_IEEE_FLOAT):
         kind = f"WAV format {tag}" if tag >= 0 else "an extensible WAV format"
         raise WavError(
@@ -187,6 +189,25 @@ def read_wav_header(source: Source) -> WavHeader:
         raise WavError(
             f"its samples are {bits}-bit {what}, and this app reads 8-, 16-, 24- "
             "and 32-bit integer and 32- and 64-bit floating-point WAV files"
+        )
+    if align > channels * width:
+        # Frames wider than their samples (the block align): 24-bit samples
+        # in 32-bit words, as ALSA's arecord wrote S24_LE. Where in its word
+        # each sample lies (left-justified, or the low three bytes as
+        # arecord's) the header doesn't say: libsndfile calls it ambiguous.
+        # Read as packed samples they were noise, a third more of them. (A
+        # block align of 0, or short of the samples, is a slip: they are
+        # packed, and read so.)
+        if align % channels:
+            raise WavError(
+                f"its format (fmt) chunk is damaged: {align} bytes a frame of "
+                f"{channels} {bits}-bit samples"
+            )
+        raise WavError(
+            f"its {bits}-bit samples are stored in {8 * align // channels}-bit "
+            "words, and its header doesn't say where in each word a sample lies; "
+            f"save it with the samples packed ({width} bytes each) or as 32-bit "
+            "samples"
         )
     return WavHeader(
         container=found.container,
@@ -245,7 +266,7 @@ def _scan_riff(handle: IO[bytes], container: str, size: int) -> _Found:
     big = container != "RIFF"
     ds64_data: Optional[int] = None
     table: Dict[bytes, int] = {}
-    fmt: Optional[Tuple[int, int, int, int]] = None
+    fmt: Optional[Tuple[int, int, int, int, int]] = None
     pos = 12
     for _ in range(_MAX_CHUNKS):
         if pos + 8 > size:  # (the end; or a damaged size went past it)
@@ -291,7 +312,7 @@ def _scan_riff(handle: IO[bytes], container: str, size: int) -> _Found:
 def _scan_w64(handle: IO[bytes], size: int) -> _Found:
     """A Sony Wave64 file: GUIDs for chunk ids, 64-bit sizes counting the
     chunk's own 24-byte header, chunks on 8-byte boundaries."""
-    fmt: Optional[Tuple[int, int, int, int]] = None
+    fmt: Optional[Tuple[int, int, int, int, int]] = None
     pos = 40
     for _ in range(_MAX_CHUNKS):
         if pos + 24 > size:  # (the end; or a damaged size went past it)
@@ -318,19 +339,19 @@ def _scan_w64(handle: IO[bytes], size: int) -> _Found:
     raise WavError("it holds no samples (no data chunk)")
 
 
-def _parse_fmt(raw: bytes) -> Tuple[int, int, int, int]:
-    """(format tag, channels, frame rate, bits per sample) of a ``fmt ``
-    chunk; an extensible format's tag is its subformat's (-1: not one of
-    the standard subformats)."""
+def _parse_fmt(raw: bytes) -> Tuple[int, int, int, int, int]:
+    """(format tag, channels, frame rate, bits per sample, block align) of a
+    ``fmt `` chunk; an extensible format's tag is its subformat's (-1: not
+    one of the standard subformats)."""
     if len(raw) < 16:
         raise WavError("its format (fmt) chunk is cut short")
-    tag, channels, rate, _byte_rate, _align, bits = struct.unpack_from("<HHIIHH", raw)
+    tag, channels, rate, _byte_rate, align, bits = struct.unpack_from("<HHIIHH", raw)
     if tag == WAVE_FORMAT_EXTENSIBLE:
         if len(raw) < 40:
             raise WavError("its format (fmt) chunk is cut short")
         sub = raw[24:40]
         tag = struct.unpack_from("<H", sub)[0] if sub[2:] == _SUBTYPE_TAIL else -1
-    return tag, channels, rate, bits
+    return tag, channels, rate, bits, align
 
 
 def _data_bytes(found: _Found) -> int:

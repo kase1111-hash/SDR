@@ -77,7 +77,7 @@ class TestReversed(_DspCase):
     def test_the_tone_is_muted_every_other_station_plays(self):
         frames, audio = _listen(_dsp((100.0, None, True)), _repeater(1.5))
         self.assertEqual(_heard(frames), [])
-        self.assertEqual(frames[-1].state, "tone")
+        self.assertEqual(frames[-1].state, "reverse")
         self.assertEqual(frames[-1].tone_heard[0], 100.0)
         for other in (None, 123.0):
             frames, audio = _listen(
@@ -93,7 +93,7 @@ class TestReversed(_DspCase):
         iq = _repeater(1.5, dcs=(23, False))
         frames, _audio = _listen(_dsp((None, (23, False), True)), iq)
         self.assertEqual(_heard(frames), [])
-        self.assertEqual(frames[-1].state, "tone")
+        self.assertEqual(frames[-1].state, "reverse")
         frames, _audio = _listen(_dsp((None, (25, False), True)), iq)
         self.assertTrue(_heard(frames))
 
@@ -132,7 +132,41 @@ class TestJudgedAfreshAsTheSquelchOpens(_DspCase):
                 continue  # (it keyed up within the hang: one transmission)
             self.assertTrue(_heard(frames[: len(first) // BLOCK]), gap)
             self.assertEqual(_heard(frames[start:]), [], gap)
-            self.assertEqual(frames[-1].state, "tone", gap)
+            self.assertEqual(frames[-1].state, "reverse", gap)
+
+
+class TestTheLampSaysReverse(_DspCase):
+    """(thr-2) While a reverse tone squelch holds a station silent, the
+    lamp reads "reverse", as the main window's (level_meter.STATES: "the
+    station sends the CTCSS tone or DCS code it mutes, or hasn't been heard
+    long enough to tell"), not "tone" ("not the chosen CTCSS tone or DCS
+    code": the opposite reason). Not reversed, "tone" as before."""
+
+    def test_the_station_it_mutes(self):
+        frames, _audio = _listen(_dsp((100.0, None, True)), _repeater(1.5))
+        states = [f.state for f in frames]
+        self.assertEqual(states[-1], "reverse")
+        self.assertNotIn("tone", states)
+        iq = _repeater(1.5, dcs=(23, False))
+        frames, _audio = _listen(_dsp((None, (23, False), True)), iq)
+        states = [f.state for f in frames]
+        self.assertEqual(states[-1], "reverse")
+        self.assertNotIn("tone", states)
+
+    def test_another_station_while_it_decides(self):
+        """Held for about half a second (it can't tell yet), then heard."""
+        for other in (None, 123.0):
+            iq = _repeater(1.5, ctcss_hz=other)
+            frames, _audio = _listen(_dsp((100.0, None, True)), iq)
+            held = [f.state for f in frames if f.state not in ("open", "closed")]
+            self.assertTrue(held, other)
+            self.assertEqual(set(held), {"reverse"}, other)
+            self.assertEqual(frames[-1].state, "open", other)
+
+    def test_not_reversed_reads_tone_as_before(self):
+        frames, _audio = _listen(_dsp((123.0, None)), _repeater(1.5))
+        self.assertEqual(frames[-1].state, "tone")
+        self.assertNotIn("reverse", [f.state for f in frames])
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +387,8 @@ class TestTheDemoRepeater(_SecondCase):
         for _ in range(240):  # 8 s more: a key-up at least
             rx._process(rx.device.read_samples(BLOCK))
             states.append(rx._level_meter.state())
-        self.assertIn("tone", states)
+        self.assertIn("reverse", states)  # (thr-2: not "tone")
+        self.assertNotIn("tone", states)
         self.assertIn("closed", states)  # (and the gap between two)
         heard = self.speaker.samples()
         peak = float(np.max(np.abs(heard))) if len(heard) else 0.0
@@ -377,6 +412,27 @@ class TestTheDemoRepeater(_SecondCase):
         rx._show_tone_heard(100.0, True, None)
         self.assertEqual(label.property("tone"), "success")
         self.assertNotIn("mutes it", label.toolTip())
+
+    def test_the_level_meter_gives_the_same_reason(self):
+        """(thr-2) The LEVEL meter's tooltip agrees with Tone heard, as the
+        main window's does: muted by the reverse tone squelch, not "not the
+        chosen CTCSS tone or DCS code"."""
+        from sdr_module.gui.level_meter import STATES
+
+        rx = self.rx
+        meter = rx._level_meter
+        rx.set_listen("second")
+        rx._sync_audio_output()
+        for _ in range(390):
+            rx._process(rx.device.read_samples(BLOCK))
+            if rx._tone_heard.text() == "100.0 Hz (1Z)" and meter.state() != "closed":
+                break
+        self.assertIn("The reverse tone squelch mutes it", rx._tone_heard.toolTip())
+        self.assertEqual(meter.state(), "reverse")
+        tip = meter.tooltip_text()
+        self.assertIn(STATES["reverse"][1], tip)
+        self.assertIn("muted by the reverse tone squelch", tip)
+        self.assertNotIn(STATES["tone"][1], tip)
 
 
 if __name__ == "__main__":

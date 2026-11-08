@@ -10127,7 +10127,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._tone_blocked = False
             if self._tones_checked(deviation):
                 tones.feed_dcs(chain.fm_raw_audio)  # (DCS: before DC blocking)
-                if not tones.process(chain.pre_nr_audio):
+                # A reverse tone squelch opens on a carrier that is there, not
+                # on the noise the squelch's hang lets through after one
+                # dropped: the station it mutes, tuned (or scanned) in the
+                # last half second of a transmission, played its squelch
+                # tail and was a bookmark scan's hit (R7W-01, R7W-03).
+                carrier = bool(gate.is_open) and not gate.hanging
+                if not tones.process(chain.pre_nr_audio, carrier):
                     tone_ok = False
                     self._tone_blocked = True
                     speaker = False

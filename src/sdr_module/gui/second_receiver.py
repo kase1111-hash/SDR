@@ -761,7 +761,11 @@ class ReceiverDsp:
                 tones.reset()
             return True
         tones.feed_dcs(chain.fm_raw_audio)  # (DCS: before DC blocking)
-        if tones.process(chain.pre_nr_audio):
+        # (A reverse tone squelch opens on a carrier that is there, not on
+        # the noise the squelch's hang lets through after one dropped, as in
+        # the main window's _route_audio.)
+        gate = self.squelch
+        if tones.process(chain.pre_nr_audio, gate.is_open and not gate.hanging):
             return True
         self._tone_blocked = True
         return False

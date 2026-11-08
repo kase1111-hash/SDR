@@ -117,6 +117,10 @@ from . import presets as preset_table
 from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
+    CLIP_FRACTION,
+    CLIP_MIN_SNR_DB,
+    CLIP_WARN_AFTER_S,
+    CLIP_WARN_EVERY_S,
     DEFAULT_CW_PITCH_HZ,
     DEFAULT_NOTCH_HZ,
     LOW_CUT_CHOICES,
@@ -126,6 +130,7 @@ from .audio_chain import (
     AudioAgc,
     AudioJoin,
     AudioOptions,
+    ClipWarning,
     DcBlocker,
     IqConditioner,
     LevelAverager,
@@ -142,6 +147,7 @@ from .bookmark_editor import bookmark_squelch
 from .bookmarks_panel import BookmarksPanel, default_bookmark_name
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
+    FM_DEVIATIONS,
     MAX_FREQUENCY_HZ,
     MIN_FREQUENCY_HZ,
     SAVE_FORMATS,
@@ -563,11 +569,11 @@ _AM_HOLD_S = _SQUELCH_HANG_S
 _AM_LEFT_S = _AM_HOLD_S + 0.1
 # FM audio clipping warning: more than this fraction of the samples beyond
 # full scale for this long (the deviation is set too small), at most this
-# often.
-_CLIP_FRACTION = 0.05
-_CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
-_CLIP_WARN_AFTER_S = 0.5
-_CLIP_WARN_EVERY_S = 30.0
+# often. (The rule both receivers use: audio_chain.ClipWarning.)
+_CLIP_FRACTION = CLIP_FRACTION
+_CLIP_MIN_SNR_DB = CLIP_MIN_SNR_DB  # (noise clips whatever the deviation)
+_CLIP_WARN_AFTER_S = CLIP_WARN_AFTER_S
+_CLIP_WARN_EVERY_S = CLIP_WARN_EVERY_S
 # Noise reduction leaves an FM or AM channel this far above its noise alone.
 _NR_CLEAN_SNR_DB = 30.0
 # The radio tuner's FM seek stops on a broadcast station: one filling at
@@ -3133,11 +3139,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tone_gate_open = False  # the squelch, as the tone squelch saw it
         self._quiet_reverse = False  # (a bookmark sets Reverse: it says so)
         self._iq_conditioner = IqConditioner()
-        self._clip_s = 0.0
-        self._clip_warn_due = 0.0
-        # How far the audio swung, (peak, often) in Hz, in the frames that
-        # clipped lately (the warning names what holds it).
-        self._clip_swings: Deque[Tuple[float, float]] = deque(maxlen=60)
+        # The FM clipping warning: how long the audio clipped lately and
+        # how far it swung (the warning names what holds it), its rule.
+        self._clip_warning = ClipWarning()
         # The Scanner tab mutes the speaker while it moves between channels,
         # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
@@ -6583,16 +6587,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if change is None:
             return False
         (target, target_deviation, target_width), name, where = change
-        broadcast = _BROADCAST_FM_DEVIATION
         self._quiet_mode_change = True  # (this says how instead)
         try:
             self._set_demod_mode(target, target_deviation or None, target_width or None)
         finally:
             self._quiet_mode_change = False
-        how = self._mode_text(target)
-        if target == "FM":
-            fm = "broadcast" if target_deviation == broadcast else "narrow"
-            how = f"FM ({fm}, {self._control_panel.get_fm_deviation_text()} deviation)"
+        how = self._band_plan_how(target, self._control_panel.get_fm_deviation_text())
         text = (
             f"{name}: listening in {how} with a "
             f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
@@ -6644,8 +6644,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return None
         target, target_deviation, _width = heard
         zone = cls._band_plan_zone(freq_hz)
-        if band is not None and cls._band_plan_zone(before_hz) == zone:
-            return None  # the same band (and segment): your mode stays
+        if zone != ("", "") and cls._band_plan_zone(before_hz) == zone:
+            # The same band (and segment), or the neighbourhood of a preset
+            # channel outside every band (a click off POCSAG's channel and
+            # back): your mode stays.
+            return None
         if mode == target:
             # FM at another deviation is not: FRS's 2.5 kHz clipped a 2 m
             # repeater (5 kHz), and a satellite's 25 kHz left it quiet.
@@ -6662,14 +6665,43 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return None  # Morse code in a CW segment stays CW (not on FT8)
         return heard, name, where
 
+    @classmethod
+    def _band_plan_how(cls, mode: str, deviation: str) -> str:
+        """How the band plan's message names the way a receiver now listens
+        (both windows'): the mode ("AM", "I/Q"), FM with the deviation in
+        the FM deviation list's own words (its table, FM_DEVIATIONS: "FM
+        (wide voice, 12.5 kHz deviation)" for "12.5 kHz (wide voice)")."""
+        if mode != "FM" or not deviation:
+            return cls._mode_text(mode)
+        shown = {value: text for value, text, _tip in FM_DEVIATIONS}
+        _value, _, words = shown.get(deviation, "").partition(" (")
+        if not words.endswith(")"):
+            return f"FM ({deviation} deviation)"
+        return f"FM ({words[:-1]}, {deviation} deviation)"
+
     @staticmethod
     def _band_plan_zone(freq_hz: float) -> Tuple[str, str]:
         """The band and, in an amateur band, the part of it (an FT8
         channel, the CW/data segment) ``freq_hz`` is in: a mode chosen
-        there stays while you tune within it."""
-        from ..core.band_plan import band_for, segment_listening
+        there stays while you tune within it. Outside every band, the
+        neighbourhood of a preset channel there (POCSAG 152.240 MHz, its
+        channel width either side): ``("", preset name)``; elsewhere
+        ``("", "")``, no place at all."""
+        from ..core.band_plan import band_for, preset_for, segment_listening
+        from ..core.frequency_manager import RX_PRESETS
 
         band = band_for(freq_hz)
+        if band is None:
+            near = [
+                (abs(freq_hz - preset.frequency_hz), str(preset.name))
+                for preset in RX_PRESETS
+                if abs(freq_hz - preset.frequency_hz) <= preset.bandwidth_hz
+                # (A channel preset, not a whole band's, itself outside
+                # every band.)
+                and preset_for(preset.frequency_hz) is preset
+                and band_for(preset.frequency_hz) is None
+            ]
+            return "", min(near)[1] if near else ""
         segment = segment_listening(freq_hz)
         return (
             band.name if band is not None else "",
@@ -10099,7 +10131,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 chain.reset_demodulator()
                 self._tone_squelch.reset()
                 self._demod_running = False
-                self._clip_s = 0.0
+                self._clip_warning.reset()
                 # (Nothing is notched while nothing plays.)
                 self._control_panel.show_notch_found(None)
             self._tone_blocked = False
@@ -10573,54 +10605,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         more than the FM deviation setting, which distorts it. Only a clear
         signal counts: noise (a squelch tail, an empty channel with the
         squelch off) clips whatever the setting. The warning names the
-        deviation that holds the swing measured while it clipped."""
-        clear = snr_db is not None and snr_db >= _CLIP_MIN_SNR_DB
-        if clear and chain.last_clip_fraction > _CLIP_FRACTION:
-            if self._clip_s <= 0.0:
-                self._clip_swings.clear()  # (a new episode)
-            self._clip_s += seconds
-            # (In Hz: the deviation may be changed while it clips.)
-            deviation = float(self._control_panel.get_fm_deviation())
-            peak, often = chain.clip_swing()
-            self._clip_swings.append((peak * deviation, often * deviation))
-        else:
-            self._clip_s = max(0.0, self._clip_s - seconds)
+        deviation that holds the swing measured while it clipped. (The rule
+        is the Second Receiver's too: audio_chain.ClipWarning.)"""
+        panel = self._control_panel
+        warning = self._clip_warning
+        if not warning.update(chain, panel.get_fm_deviation(), seconds, snr_db):
             return
-        now = time.monotonic()
-        if self._clip_s < _CLIP_WARN_AFTER_S or now < self._clip_warn_due:
-            return
-        self._clip_warn_due = now + _CLIP_WARN_EVERY_S
-        self._clip_s = 0.0
-        current = self._control_panel.get_fm_deviation_text()
-        text = f"FM audio is clipping: this station deviates more than {current}"
-        holds = self._deviation_holding_clip(self._control_panel.get_fm_deviation())
-        if holds == "75 kHz":
-            text += (
-                ". Choose a larger FM deviation in Demodulation, such as 75 kHz "
-                "(broadcast) for an FM radio station."
-            )
-        elif holds:
-            text += f". Choose a larger FM deviation in Demodulation: {holds} holds it."
-        else:
-            text += ", the largest FM deviation offered."
+        text = warning.text(
+            panel.get_fm_deviation(), current=panel.get_fm_deviation_text()
+        )
         self._show_status_message(text, "warning", 8000)
-
-    def _deviation_holding_clip(self, deviation_hz: float) -> str:
-        """The FM deviation choice that holds the swing measured while the
-        audio clipped at ``deviation_hz`` (the rule Identify suggests one
-        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
-        kHz), at least the next larger choice; "" when none is larger."""
-        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
-
-        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
-        if not larger:
-            return ""
-        swings = np.asarray(self._clip_swings, dtype=float).reshape(-1, 2)
-        if not len(swings):
-            return larger[0]
-        peak, often = np.median(swings, axis=0)
-        holds = _deviation_for(float(peak), float(often))
-        return holds if holds in larger else larger[0]
 
     def _follow_realtime_hint(self) -> None:
         """While audio stays paused and the status bar still says why, it
@@ -10717,7 +10711,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tone_squelch.reset()
         self._tone_blocked = False
         self._iq_conditioner.reset()
-        self._clip_s = 0.0
+        self._clip_warning.reset()
         self._show_stereo(None, False)
 
     def _demodulate(
@@ -11164,7 +11158,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._device is not None and not self._demo_mode:
             self._release_device()
         if self._device is None:
-            self._device = MockDevice()
+            self._device = MockDevice(shared_sky=True)  # (R8-04: one sky)
             # The rate asked for without a device (--sample-rate), else the
             # one the demo device had last time.
             rate = self._preferred_rate or self._device_controls.remembered_rate("demo")

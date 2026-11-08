@@ -87,6 +87,9 @@ RECEIVER_MARK = "2nd RX"
 RATE_PLACE = "Sample rate (this window's Device group)"
 #: The last message's row before the first one comes (and after Clear).
 NO_MESSAGE_YET = "No message yet"
+#: The decoder whose line in progress, speed and keying the Decoder tab's
+#: Text view shows (see DecoderRows._show_line_received).
+_MORSE = "CW (Morse)"
 
 #: (frames, valid, failed) of a decoder's status.
 _Counts = Tuple[int, int, int]
@@ -428,6 +431,11 @@ if HAS_PYQT6:
 
         def _on_decode_toggled(self, on: bool) -> None:
             self._save(KEY + "decode", bool(on))
+            if not on:
+                # (Nothing is received while it is paused; the line it holds
+                # shows again with the next frame decoded.)
+                self._settle_frames()
+                self._show_line_received(None)
             self._update_decoder_line()
 
         def _decoding_now(self) -> bool:
@@ -448,6 +456,7 @@ if HAS_PYQT6:
             self._settle_frames()
             decoding = self._work.decoding
             self._push_decoded(decoding.flush(), self._tuned_hz)
+            self._show_line_received(None)  # (the new one says what it hears)
             decoding.choose(
                 self._decoder_protocol(), self._rate(), self._tuned_hz - self._lo_hz
             )
@@ -546,19 +555,30 @@ if HAS_PYQT6:
 
         def _show_line_received(self, status: Any) -> None:
             """The Morse line this receiver is receiving (its decoder's
-            status, made on the DSP worker with the frame): in the Decoder
-            tab's Text view after its finished lines, as the main window's
-            is in Live (R7L-4). "" for other protocols."""
+            status, made on the DSP worker with the frame), its speed and
+            whether a keyed signal is heard: in the Decoder tab's Text view
+            after its finished lines, as the main window's are in Live
+            (R7L-4, R8-05). Nothing for other protocols, and for None (the
+            stream ended, or no decoder runs now)."""
             if self._main_gone:
                 return
             panel = getattr(self._win, "_decoder_panel", None)
             show = getattr(panel, "set_receiver_live", None)
-            if callable(show):
-                show(RECEIVER_MARK, str(getattr(status, "live_text", "") or ""))
+            if not callable(show):
+                return
+            morse = getattr(status, "name", "") == _MORSE
+            show(
+                RECEIVER_MARK,
+                str(getattr(status, "live_text", "") or ""),
+                str(getattr(status, "detail", "") or "") if morse else "",
+                morse and bool(getattr(status, "signal_present", False)),
+            )
 
         def _flush_decoder(self) -> None:
-            """The stream ends (Stop): what the decoder still holds."""
+            """The stream ends (Stop): what the decoder still holds (and
+            nothing is being received now)."""
             self._push_decoded(self._work.decoding.flush(), self._tuned_hz)
+            self._show_line_received(None)
 
         def _on_decoder_tab_cleared(self) -> None:
             """The Decoder tab's Clear: this receiver's count and last

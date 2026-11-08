@@ -400,6 +400,30 @@ class IqFileOptions:
         I/Q's (:attr:`sample_rate`)."""
         return 2.0 * self.sample_rate if self.real_signal else self.sample_rate
 
+    @property
+    def rate_text(self) -> str:
+        """Its sample rate in words: "2.4 MS/s"; a one-channel file's says
+        it is its I/Q's, "24 kS/s as I/Q (48 kS/s in the file)" ("" when
+        unknown)."""
+        if not self.sample_rate:
+            return ""
+        text = format_rate(self.sample_rate)
+        if self.real_signal:
+            text += f" as I/Q ({format_rate(self.frame_rate)} in the file)"
+        return text
+
+    @property
+    def own_frequencies(self) -> bool:
+        """A one-channel file read at its own frequencies (0 Hz to half its
+        rate, centered on a quarter of it), not placed elsewhere by its
+        metadata (an IF at its RF): for audio, its sound's frequencies,
+        where no receiver was tuned."""
+        return (
+            self.real_signal
+            and self.sample_rate > 0
+            and abs(self.center_hz - self.sample_rate / 2.0) <= 0.5
+        )
+
     def decodes_as_audio(self, protocol: str) -> bool:
         """Whether File > Decode Recording reads this file as a receiver's
         audio for ``protocol``: audio (:attr:`audio`) and a protocol sent

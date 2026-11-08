@@ -277,5 +277,65 @@ class TestTheFrequencyInTheFileName(_WavCase):
         self.win._playback.close()
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestConvertingAnAudioFile(_WavCase):
+    """ui-3: File > Convert Recording of a one-channel audio file (8 kHz)
+    said "Sample rate: 0.004 MS/s" and "Center frequency: 2 kHz" (its I/Q's,
+    unexplained) and offered Tune There, "Tune the receiver to 2 kHz, where
+    the recording was made": a quarter of its rate, the middle of its own
+    sound's frequencies, where no receiver was tuned (the live receiver
+    went to 2 kHz; an RTL-SDR refuses it). Tune There is kept where a
+    receiver was tuned: two-channel I/Q, a one-channel file its metadata
+    places, a capture of RF sampled directly."""
+
+    def _one_channel(self, name, rate, seconds, width=2):
+        t = np.arange(int(seconds * rate)) / rate
+        x = 0.4 * np.sin(2 * np.pi * (rate / 9.6) * t)
+        path = self.path(name)
+        return path, iq_wav(path, x, "int", width, int(rate)), len(x)
+
+    def summary(self, path, *answers):
+        self.answer(*answers)
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._convert_recording())
+        warn.assert_not_called()
+        box = self.boxes[-1]
+        return box, [b.text().replace("&", "") for b in box.buttons()]
+
+    def test_audio_says_what_it_is_and_offers_no_tune_there(self):
+        path, _offset, frames = self._one_channel("cw8k_s24.wav", 8000, 2.0, 3)
+        before = self.win._current_frequency()
+        box, names = self.summary(path, "Close")
+        self.assertNotIn("Tune There", names)
+        self.assertIn("Play", names)
+        info = box.informativeText()
+        self.assertIn("Sample format: 24-bit integer WAV, one channel", info)
+        self.assertIn("Sample rate: 4 kS/s as I/Q (8 kS/s in the file)", info)
+        self.assertIn(
+            "Center frequency: 2 kHz (the middle of its own frequencies, 0 Hz to "
+            "4 kHz)",
+            info,
+        )
+        self.assertIn("Length: 2.0 s", info)
+        self.assertEqual(
+            box.text(), f"Loaded {frames // 2:,} samples from cw8k_s24.wav."
+        )
+        self.assertEqual(self.win._current_frequency(), before)  # (not retuned)
+
+    def test_tune_there_where_a_receiver_was_tuned(self):
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+        from tests.test_gui_wav_formats import _noisy_tone
+
+        x = _noisy_tone(int(0.2 * RATE), 30e3, RATE)
+        iq = self._wav("iq.wav", x, "int", 2, "RIFF", 145e6)
+        placed, offset, _n = self._one_channel("if.wav", 8000, 1.0)
+        write_sidecar(placed, SampleFormat.INT16, 8000.0, 10.7e6, header_bytes=offset)
+        rf, _offset, _n = self._one_channel("am_band.wav", 2.4e6, 0.05)
+        for path, where in ((iq, 145e6), (placed, 10.7e6), (rf, 600e3)):
+            box, names = self.summary(path, "Tune There")
+            self.assertIn("Tune There", names)
+            self.assertAlmostEqual(self.win._current_frequency(), where, delta=1)
+
+
 if __name__ == "__main__":
     unittest.main()

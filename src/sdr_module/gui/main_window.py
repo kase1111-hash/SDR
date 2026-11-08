@@ -10214,7 +10214,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         (the speaker off, the Second Receiver's Listen) ends here, as the
         next block would end it: what is held, faded out, and nothing
         after it (with that block, up to a second later at 0.5x, it came
-        back for a moment after it had stopped)."""
+        back for a moment after it had stopped). At the end of a
+        recording its sound ends with the last of it given out: the decay
+        from its last sample comes right after it, and the playback stops
+        at its next tick (which waits for it: stopped as soon as the end
+        was read, up to a quarter of a second of 8 kHz audio's end was cut
+        off)."""
         if not self._playback.active:
             return
         sound = self._playback_sound
@@ -10229,9 +10234,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._speak(np.zeros(0, dtype=np.float32), last=True)
                 join.stop()
             return
+        rest = sound.rest_s
         audio = sound.more(now)
         if len(audio):
             self._audio.write(audio)
+        if rest and not sound.rest_s and getattr(self._device, "finished", False):
+            self._speak(join.release(), last=True)
 
     def _set_stereo_enabled(self, on: bool) -> None:
         """Radio > Audio > Stereo (K-S1): broadcast FM in stereo where the

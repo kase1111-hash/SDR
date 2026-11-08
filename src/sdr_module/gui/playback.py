@@ -928,8 +928,14 @@ if HAS_PYQT6:
             self._bar.set_playing(self._win._is_running, device.finished)
 
         def _on_loop_changed(self, on: bool) -> None:
-            if self._device is not None:
-                self._device.loop = bool(on)
+            device = self._device
+            if device is not None:
+                device.loop = bool(on)
+                if on and device.finished and self._win._is_running:
+                    # Its end was read, its sound still plays (see _tick):
+                    # it plays on from the start, as Loop does, instead of
+                    # stopping at the next tick.
+                    device.seek(device.position)
 
         def set_speed(self, speed: float) -> None:
             device = self.device
@@ -954,7 +960,10 @@ if HAS_PYQT6:
                 win._show_status_message(speed_note(1.0), "info", 2500)
 
         def _tick(self) -> None:
-            """Follow the playing position; pause at the end of the file."""
+            """Follow the playing position; pause at the end of the file,
+            once its sound has played (at 1x the rest of a block longer
+            than the speaker holds is still given out as it plays: see the
+            window's ``_between_blocks``)."""
             device = self.device
             if device is None:
                 self._timer.stop()
@@ -965,7 +974,7 @@ if HAS_PYQT6:
                 # (Logged by the device: one Error History entry.)
                 win._show_status_error(f"Playback stopped: {device.error}.", log=False)
                 device.error = None
-            elif device.finished and win._is_running:
+            elif device.finished and win._is_running and not win._playback_sound.rest_s:
                 win._stop_acquisition()
                 win._show_status_message(
                     f"End of {device.options.name}. Press Play (Space) to play "

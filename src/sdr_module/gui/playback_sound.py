@@ -218,6 +218,14 @@ class PlaybackSound:
         :meth:`finish` ends."""
         return self._stretching or self._held is not None
 
+    @property
+    def rest_s(self) -> float:
+        """At 1x, seconds of a block longer than the speaker holds still to
+        be given out as it plays (:meth:`more`): a recording at its end
+        has that much of its sound still to play. 0.0 when no such block
+        is held (at another speed the stretch holds the sound)."""
+        return 0.0 if self._held is None else len(self._held) / self.rate
+
     def reset(self) -> None:
         """Forget the stream and the pace (a new recording, a seek). What
         the speaker still plays is kept in mind: it is the same speaker."""

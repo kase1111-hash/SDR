@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -737,6 +738,107 @@ class TestTheBandPlanNamesTheDeviationAsTheListDoes(_BothWindowsCase):
                     message(),
                     (name, text),
                 )
+
+
+# --------------------------------------------------------------------------- #
+# R8-04: the demo receivers hear one sky
+# --------------------------------------------------------------------------- #
+
+
+class TestTheDemoAirlinerFliesOneSky(unittest.TestCase):
+    """R8-04: each demo device flew the demo airliner on a clock of its own
+    (from its first read), so the main window and the Second Receiver,
+    started a few seconds apart on 1090 MHz, heard different position
+    frames: the Aircraft view's Msgs read between one receiver's count and
+    the sum (54 for 36 + 36, the Second Receiver started 3 s later). The
+    app's demo receivers now share one sky: they hear the same replies,
+    bit for bit, at the same moment. A device on its own, or one not of
+    the app's receivers, flies the airliner as before."""
+
+    RATE = 2.4e6
+    BLOCK = 80_000  # (a display frame at 2.4 MS/s)
+
+    def setUp(self):
+        from sdr_module.gui import device_dialog
+
+        self.dd = device_dialog
+        patcher = mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9)
+        patcher.start()  # (every sample is read, however slowly)
+        self.addCleanup(patcher.stop)
+
+    def demo(self, shared=True, seed=7):
+        dev = self.dd.MockDevice()
+        dev.shared_sky = shared  # (as the app's windows make theirs)
+        dev.set_sample_rate(self.RATE)
+        dev.set_frequency(1090e6)
+        dev._rng = np.random.default_rng(seed)
+        dev.start_rx()
+        self.addCleanup(dev.close)
+        return dev
+
+    def started_earlier(self, dev, seconds):
+        """``dev`` has streamed for ``seconds`` already (keeping up)."""
+        dev.read_samples(self.BLOCK)
+        dev._stream_pos += int(seconds * self.RATE)
+        dev._stream_epoch -= seconds
+
+    def decode(self, devices, seconds):
+        """Each device's ADS-B messages over the same ``seconds``, read a
+        display frame at a time, in turn: (time s, raw frame) lists."""
+        from sdr_module.dsp.live_decoders import create_live_decoder
+
+        decoders = [create_live_decoder("ADS-B", self.RATE) for _ in devices]
+        heard = [[] for _ in devices]
+        for step in range(int(seconds * self.RATE / self.BLOCK)):
+            for dev, decoder, out in zip(devices, decoders, heard, strict=True):
+                for msg in decoder.process(dev.read_samples(self.BLOCK)):
+                    out.append((step * self.BLOCK / self.RATE, bytes(msg.raw_bits)))
+        return heard
+
+    def test_two_demo_receivers_hear_the_same_replies(self):
+        from sdr_module.gui.decoder_views import AircraftTracker
+
+        main = self.demo(seed=1)
+        self.started_earlier(main, 3.0)  # (the Second Receiver comes later)
+        second = self.demo(seed=2)
+        ours, theirs = self.decode((main, second), 6.0)
+        self.assertGreater(len(ours), 15)
+        self.assertLessEqual(abs(len(ours) - len(theirs)), 1)  # (the ends)
+        # Each reply the main receiver heard (away from the ends), the
+        # Second Receiver heard too, bit for bit, at the same moment (the
+        # frame it was read in, or the next).
+        for at, frame in ours:
+            if 0.2 < at < 5.8:
+                self.assertTrue(
+                    any(f == frame and abs(t - at) < 0.1 for t, f in theirs),
+                    (at, frame.hex()),
+                )
+        # The Aircraft view counts each reply once.
+        tracker = AircraftTracker(clock=lambda: 0.0)
+        both = [(at, "", f) for at, f in ours] + [(at, "2nd RX", f) for at, f in theirs]
+        for at, receiver, frame in sorted(both):  # (as they come)
+            msg = SimpleNamespace(icao_address="4840D6", raw_bits=frame)
+            tracker.update(msg, at=at, receiver=receiver)
+        self.assertLessEqual(
+            tracker.get("4840D6").messages, max(len(ours), len(theirs))
+        )
+
+    def test_a_device_on_its_own_flies_from_its_start(self):
+        # Exactly the samples it gave before (its first half second: the
+        # airliner's ident at 0.10 s and a position at 0.35 s): no other
+        # demo receiver streams, or it isn't one of the app's, or the
+        # other has stopped.
+        n = int(0.5 * self.RATE)
+        alone = self.demo(seed=3)
+        samples = alone.read_samples(n)
+        alone.close()
+        live = self.demo(seed=4)
+        self.started_earlier(live, 3.0)
+        other = self.demo(shared=False, seed=3)
+        np.testing.assert_array_equal(other.read_samples(n), samples)
+        live.close()
+        later = self.demo(seed=3)
+        np.testing.assert_array_equal(later.read_samples(n), samples)
 
 
 if __name__ == "__main__":

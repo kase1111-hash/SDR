@@ -2185,7 +2185,7 @@ if HAS_PYQT6:
             if source.kind == "demo":
                 from .device_dialog import MockDevice
 
-                device: Any = MockDevice()
+                device: Any = MockDevice(shared_sky=True)  # (R8-04: one sky)
             else:
                 problem = self._host_problem(source)
                 if problem:

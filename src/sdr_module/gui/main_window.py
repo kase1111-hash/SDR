@@ -11158,7 +11158,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._device is not None and not self._demo_mode:
             self._release_device()
         if self._device is None:
-            self._device = MockDevice()
+            self._device = MockDevice(shared_sky=True)  # (R8-04: one sky)
             # The rate asked for without a device (--sample-rate), else the
             # one the demo device had last time.
             rate = self._preferred_rate or self._device_controls.remembered_rate("demo")

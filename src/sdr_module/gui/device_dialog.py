@@ -16,6 +16,7 @@ import logging
 import math
 import threading
 import time
+import weakref
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
@@ -692,7 +693,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
             return device
 
         # Demo device (and legacy mock entries): simulated signals.
-        device = MockDevice()
+        device = MockDevice(shared_sky=True)
         device.set_sample_rate(rate)
         return device
 
@@ -2002,6 +2003,48 @@ def _squitter_spans(pos: int, n: int, rate: float) -> List[tuple]:
     return spans
 
 
+# (R8-04) One sky for the demo receivers: the airliner is one aircraft. A
+# demo device made with ``shared_sky`` (the main window's, the Second
+# Receiver's) whose stream starts while another such device streams (read
+# in the last _SKY_LIVE_S) flies it on that device's clock, so the two
+# receivers on 1090 MHz hear each of its replies at the same moment, bit
+# for bit, as two real receivers do (the Aircraft view counts it once). A
+# device on its own flies it from its own stream position 0, as before;
+# the other aircraft's replies and every other signal keep each device's
+# own clock.
+_SKY_LIVE_S = 1.0
+_SKY_DEVICES: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_SKY_LOCK = threading.Lock()
+
+
+def _join_sky(device: Any, pos: int, rate: float, now: float) -> float:
+    """``device``'s stream starts at ``now`` with the sample at stream
+    position ``pos`` (at ``rate``): how far (s) the airliner's clock runs
+    ahead of its stream's. 0 while no other device of the shared sky
+    streams (or ``device`` isn't of it); else what puts it on that
+    device's clock at this moment."""
+    if not device.shared_sky:
+        return 0.0
+    with _SKY_LOCK:
+        others = [
+            other
+            for other in _SKY_DEVICES
+            if other is not device
+            and other._running
+            and other._last_read is not None
+            and 0.0 <= now - other._last_read <= _SKY_LIVE_S
+        ]
+        _SKY_DEVICES.add(device)
+    if not others:
+        return 0.0
+    other = others[0]
+    # Its last read ended at its stream position, about when it read (it
+    # keeps up with the clock, or it skips ahead to it).
+    sky = other._stream_pos / other._stream_rate + other._sky_offset_s
+    sky += now - other._last_read
+    return sky - pos / rate
+
+
 class _Bursts:
     """Short transmissions at fixed places in a loop of ``period`` samples,
     stored sparsely (the loop is mostly silence)."""
@@ -2282,8 +2325,12 @@ class MockDevice:
     _AGC_HEADROOM_DB = 10.0
     _AGC_RANGE_DB = (0.0, 40.0)
 
-    def __init__(self):
+    def __init__(self, shared_sky: bool = False):
         self.info = self.MockInfo()
+        #: (R8-04) A demo receiver of the app's (the main window's, the
+        #: Second Receiver's): its airliner flies the sky of the others
+        #: streaming (see _join_sky). Off: its own, from position 0.
+        self.shared_sky = bool(shared_sky)
         self._frequency = float(DEFAULT_FREQUENCY_HZ)
         self._sample_rate = 2.4e6
         self._gain = 20
@@ -2295,6 +2342,12 @@ class MockDevice:
         self._stream_pos = 0
         self._stream_rate = 0.0
         self._stream_epoch: Optional[float] = None
+        #: (R8-04) When the stream was last read (time.monotonic), and how
+        #: far (s) the demo airliner's clock runs ahead of the stream's:
+        #: 0 alone, else the clock of the shared-sky device already
+        #: streaming when this one's stream started (see _join_sky).
+        self._last_read: Optional[float] = None
+        self._sky_offset_s = 0.0
         #: Samples skipped to catch up with the clock (read too slowly), as
         #: the drivers count those their queue dropped: an I/Q recording
         #: says it has gaps.
@@ -2442,6 +2495,8 @@ class MockDevice:
             self._stream_rate = rate
         if self._stream_epoch is None:
             self._stream_epoch = now - self._stream_pos / rate
+            self._sky_offset_s = _join_sky(self, self._stream_pos, rate, now)
+        self._last_read = now
         # Reading slower than real time: skip ahead, so timed signals follow
         # the clock. Reading faster (a scan) just runs ahead.
         behind = (now - self._stream_epoch) * rate - (self._stream_pos + n)
@@ -2525,7 +2580,10 @@ class MockDevice:
         if kind == "modes":
             # Short pulsed replies: only the samples they cover.
             spans = _loops(kind, seed, rate).spans(pos, n)
-            spans += _squitter_spans(pos, n, rate)
+            # (The airliner on the sky clock it shares with the other demo
+            # devices streaming: _join_sky.)
+            sky = int(round(self._sky_offset_s * rate))
+            spans += _squitter_spans(pos + sky, n, rate)
             for a, b, envelope in spans:
                 wave = self._carrier(offset, amp, rate, pos + a, b - a)
                 wave *= envelope

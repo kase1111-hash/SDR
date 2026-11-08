@@ -118,7 +118,7 @@ from .audio_chain import (
     channel_power_db,
 )
 from .audio_sink import AudioSink
-from .bookmark_editor import bookmark_dcs
+from .bookmark_editor import bookmark_squelch
 from .bookmarks_panel import default_bookmark_name, format_mhz
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
@@ -560,7 +560,12 @@ class ReceiverDsp:
     one, or none, reads ``"tone"`` on the frame's lamp and stays silent;
     each frame says what is heard (:attr:`Frame.tone_heard`). Set
     ``options.tone_squelch`` with it (narrow FM is then heard from 300 Hz
-    up, without the tone or the code's bits).
+    up, without the tone or the code's bits). Reversed (CHIRP's TSQL-R and
+    DTCS-R, a third ``True``), it mutes the stations sending that tone or
+    code and plays every other one. A signal the squelch has just opened on
+    is judged afresh, whatever was demodulated before it (as the main
+    window's ``_route_audio`` does): the station a reverse tone squelch
+    mutes isn't heard for the first half second of its transmission.
     """
 
     def __init__(self) -> None:
@@ -584,12 +589,10 @@ class ReceiverDsp:
         self.tuned_hz: Optional[float] = None
         self._tuned_last: Optional[float] = None
         #: The tone squelch: ``(CTCSS tone Hz, DCS (code, inverted))``, at
-        #: most one of them set; ``(None, None)``: none. One value, taken up
-        #: by :attr:`tones` at the next block (on the DSP worker).
-        self.tone_squelch: Tuple[Optional[float], Optional[Tuple[int, bool]]] = (
-            None,
-            None,
-        )
+        #: most one of them set; ``(None, None)``: none; ``(tone, code,
+        #: True)``: reversed (TSQL-R, DTCS-R). One value, taken up by
+        #: :attr:`tones` at the next block (on the DSP worker).
+        self.tone_squelch: Tuple[Any, ...] = (None, None)
         self.tones = ToneSquelch(_AUDIO_RATE)
         self._tone_blocked = False  # (the last block: not the tone chosen)
         self.squelch = SquelchGate(-80.0)
@@ -675,9 +678,11 @@ class ReceiverDsp:
         (``play``: the speaker wants this receiver) the audio to play."""
         samples = np.asarray(samples, dtype=np.complex64)
         tones = self.tones
-        tone_hz, dcs = self.tone_squelch
-        if (tones.tone_hz, tones.dcs) != (tone_hz, dcs):
-            tones.tone_hz, tones.dcs = tone_hz, dcs
+        choice = self.tone_squelch  # (read once: the window may set it)
+        tone_hz, dcs = choice[0], choice[1]
+        reverse = len(choice) > 2 and bool(choice[2])
+        if (tones.tone_hz, tones.dcs, tones.reverse) != (tone_hz, dcs, reverse):
+            tones.tone_hz, tones.dcs, tones.reverse = tone_hz, dcs, reverse
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
         power = self.spectrum(display)
         self._noise.update(power, len(samples) / max(self.rate, 1.0))
@@ -701,7 +706,13 @@ class ReceiverDsp:
         gate.hang_s = _CW_SQUELCH_HANG_S if self.mode == "CW" else _SQUELCH_HANG_S
         audible = self.audible
         if audible:
-            gate.update(gate_level, noise, seconds)
+            if gate.update(gate_level, noise, seconds) == "opened":
+                # A signal the squelch has just opened on is judged afresh
+                # (as in the main window's _route_audio): a block demodulated
+                # while it closed (its fade out) left the last station's
+                # verdict, and a reverse tone squelch let the station it
+                # mutes play until its tone was heard (0.6 s).
+                tones.reset()
             state = ("open" if gate.is_open else "closed") if gate.enabled else "off"
         else:
             state = "idle"
@@ -3586,20 +3597,23 @@ if HAS_PYQT6:
                 return False
             if not self.tune(freq):
                 return False
-            demod, deviation, width, tone = bookmark_listening(bookmark)
+            demod, deviation, width, _tone = bookmark_listening(bookmark)
             squelch = ""
             if demod:
                 self._listen_like_bookmark(demod, deviation, width)
                 if demod == "FM":
                     # Its tone squelch, as the main window applies it: its
-                    # CTCSS tone or DCS code, or none.
-                    dcs = None if tone else bookmark_dcs(bookmark)
-                    self._set_tone_choice(tone, dcs)
+                    # CTCSS tone or DCS code, or none, reversed or not
+                    # (CHIRP's TSQL-R, DTCS-R).
+                    tone, dcs, reverse = bookmark_squelch(bookmark)
+                    self._set_tone_choice(tone, dcs, reverse)
                     tone, dcs = self._tone_choice()
                     if dcs is not None:
                         squelch = f", {dcs_label(*dcs)}"
                     elif tone:
                         squelch = f", tone squelch {tone:.1f} Hz"
+                    if squelch and reverse:
+                        squelch = f", reverse {squelch[2:]}"
             label = str(bookmark.get("label") or "") or format_frequency(freq)
             mode = "I/Q" if self.mode().startswith("None") else self.mode()
             self._show_message(f"Tuned to {label} ({mode}{squelch})", "info", 3000)
@@ -3638,12 +3652,18 @@ if HAS_PYQT6:
                 tone, dcs = self._tone_choice()
                 if mode != "FM" or abs(freq - self._tuned_hz) >= 0.5:
                     tone, dcs = None, None
+                # (Reversed too: CHIRP's TSQL-R, DTCS-R.)
+                reverse = self._tone_reverse_check.isChecked()
                 if tone:
-                    panel.set_tone(index, tone)
-                    short += f", tone squelch {tone:.1f} Hz"
+                    panel.set_tone(index, tone, reverse=reverse)
+                    squelch = f"tone squelch {tone:.1f} Hz"
                 elif dcs is not None:
-                    panel.set_dcs(index, *dcs)
-                    short += f", {dcs_label(*dcs)}"
+                    panel.set_dcs(index, *dcs, reverse=reverse)
+                    squelch = dcs_label(*dcs)
+                else:
+                    squelch = ""
+                if squelch:
+                    short += f", reverse {squelch}" if reverse else f", {squelch}"
                 self._show_message(
                     f"Bookmarked {name} ({short}) in the main window's Bookmarks.",
                     "success",

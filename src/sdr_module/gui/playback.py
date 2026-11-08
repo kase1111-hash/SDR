@@ -123,7 +123,7 @@ class FilePlaybackDevice:
         self._running = False
         self._finished = False
         # What the read that found the end of the file (Loop off) asked for
-        # beyond it (see short_by).
+        # beyond it: the next read brings it once Loop is on (see play_on).
         self._short = 0
         #: Start again at the end of the file.
         self.loop = False
@@ -208,6 +208,9 @@ class FilePlaybackDevice:
         if not self._running:
             return None
         n = int(num_samples)
+        if self.loop and self._short:
+            # (Loop turned on after the end was read: see play_on.)
+            n, self._short = max(n, 0) + self._short, 0
         if n <= 0 or self._total <= 0:
             return np.zeros(0, dtype=np.complex64)
         try:
@@ -254,8 +257,8 @@ class FilePlaybackDevice:
 
     @property
     def short_by(self) -> int:
-        """Samples the read that found the end of the file (Loop off)
-        asked for beyond it; 0 when it found none."""
+        """Samples the read that found the end of the file asked for
+        beyond it, still owed (see :meth:`play_on`); 0 when none are."""
         return self._short
 
     @property
@@ -281,6 +284,16 @@ class FilePlaybackDevice:
         self._player.seek(sample)
         self._finished = False
         self._short = 0
+
+    def play_on(self) -> None:
+        """Loop turned on after the end of the file was read (its sound
+        still playing): reading goes on from the start, and the next read
+        also brings what the one that found the end asked for beyond it,
+        from the start, as Loop on all along would have. (The window
+        counted that read whole and asks for the next only when it is
+        due: the start came after a gap as long as the last read fell
+        short, up to half a second of 8 kHz audio.)"""
+        self._finished = False
 
     def seek_seconds(self, seconds: float) -> None:
         self.seek(int(round(float(seconds) * self._rate)))
@@ -946,7 +959,7 @@ if HAS_PYQT6:
                     # Its end was read, its sound still plays (see _tick):
                     # it plays on from the start, as Loop does, instead of
                     # stopping at the next tick.
-                    device.seek(device.position)
+                    device.play_on()
 
         def set_speed(self, speed: float) -> None:
             device = self.device

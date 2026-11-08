@@ -700,10 +700,12 @@ class TestTheSpeakersRoom(unittest.TestCase):
     def test_no_more_than_audiosink_plays_while_a_frame_takes_long(self):
         """The most the speaker is given fits AudioSink's own buffer (what
         doesn't fit waits for the window to hand it over between frames),
-        with room under its HIGH_S for a stream's end."""
+        with room under its HIGH_S for a stream's end; a recording going on
+        after its end at 1x never takes it past HIGH_S."""
         self.assertLessEqual(PlaybackSound.MOST_HELD_S, AudioSink.BUFFER_S)
         self.assertLess(PlaybackSound.MOST_HELD_S + 0.0125, AudioSink.HIGH_S)
         self.assertGreaterEqual(PlaybackSound.MOST_HELD_S, AudioSink.TARGET_S)
+        self.assertLessEqual(PlaybackSound.OVERRUN_S, AudioSink.HIGH_S)
 
 
 class TestStallsAndChanges(unittest.TestCase):
